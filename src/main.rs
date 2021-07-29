@@ -296,15 +296,15 @@ impl Words {
     }
 }
 
-fn get_words_subtitles(subtitles: &str) -> Vec<String> {
-    let subtitles = srtparse::from_str(subtitles).unwrap();
+fn get_words_subtitles(subtitles: &str) -> Result<Vec<String>, srtparse::ReaderError> {
+    let subtitles = srtparse::from_str(subtitles)?;
     let text = subtitles
         .into_iter()
         .map(|x| x.text)
         .collect::<Vec<_>>()
         .join("\n");
 
-    get_words(&text)
+    Ok(get_words(&text))
 }
 
 fn get_words(text: &str) -> Vec<String> {
@@ -346,6 +346,10 @@ impl Default for Settings {
 
 fn read_clipboard() -> Option<String> {
     miniquad::clipboard::get(unsafe { get_internal_gl().quad_context })
+}
+
+fn write_clipboard(s: &str) {
+    miniquad::clipboard::set(unsafe { get_internal_gl().quad_context }, s)
 }
 
 mod gui {
@@ -449,6 +453,7 @@ mod gui {
 
     struct LoadTextWindow {
         load_subtitles: bool,
+        subtitles_error: Option<String>,
         text: Result<String, String>,
     }
 
@@ -461,6 +466,7 @@ mod gui {
         fn new(load_subtitles: bool) -> Self {
             Self {
                 load_subtitles,
+                subtitles_error: None,
                 text: read_clipboard().ok_or_else(String::new),
             }
         }
@@ -479,21 +485,30 @@ mod gui {
             .scroll(false)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    if ui.button("Update clipboard").clicked() {
-                        self.text = read_clipboard().ok_or_else(String::new);
-                    }
                     if ui.button("Use this text").clicked() {
                         let text = self.text.as_ref().unwrap_or_else(|x| x);
+
                         let words = if self.load_subtitles {
-                            get_words_subtitles(&text)
+                            match get_words_subtitles(&text) {
+                                Ok(words) => Some(words),
+                                Err(error) => {
+                                    self.subtitles_error = Some(format!("{:#?}", error));
+                                    None
+                                }
+                            }
                         } else {
-                            get_words(&text)
+                            Some(get_words(&text))
                         };
-                        let words = words
-                            .into_iter()
-                            .filter(|x| !known_words.contains(x))
-                            .collect();
-                        action = Some(LoadTextAction::CreateAddWordWindow(words));
+                        if let Some(words) = words {
+                            let words = words
+                                .into_iter()
+                                .filter(|x| !known_words.contains(x))
+                                .collect();
+                            action = Some(LoadTextAction::CreateAddWordWindow(words));
+                        }
+                    }
+                    if ui.button("Update clipboard").clicked() {
+                        self.text = read_clipboard().ok_or_else(String::new);
                     }
                 });
                 match &mut self.text {
@@ -511,6 +526,14 @@ mod gui {
                     Err(text) => {
                         ui.text_edit_multiline(text);
                     }
+                }
+                if let Some(error) = &self.subtitles_error {
+                    ui.separator();
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.;
+                        ui.add(Label::new("Error: ").text_color(Color32::RED).monospace());
+                        ui.monospace(error);
+                    });
                 }
             });
 
@@ -620,12 +643,14 @@ mod gui {
             correct_answer: WordsToLearn,
             words_to_type: Vec<String>,
             words_to_guess: Vec<String>,
+            gain_focus: bool,
         },
         Checked {
             word: String,
             known_words: Vec<String>,
             words_to_type: Vec<Result<String, (String, String)>>,
             words_to_guess: Vec<Result<String, (String, String)>>,
+            gain_focus: bool,
         },
     }
 
@@ -664,6 +689,7 @@ mod gui {
                             correct_answer: result,
                             words_to_type,
                             words_to_guess,
+                            gain_focus: true,
                         };
                         return;
                     }
@@ -688,9 +714,12 @@ mod gui {
                     correct_answer,
                     words_to_type,
                     words_to_guess,
+                    gain_focus,
                 } => {
                     ui.label(format!("Words remains: {}", self.to_type_today.len()));
                     ui.label(format!("Word: {}", word));
+
+                    let mut focus_gained = false;
 
                     for i in &mut correct_answer.known_words {
                         ui.add(egui::TextEdit::singleline(i).enabled(false));
@@ -700,10 +729,20 @@ mod gui {
                         .iter()
                         .zip(words_to_type.iter_mut())
                     {
-                        ui.add(egui::TextEdit::singleline(i).hint_text(hint));
+                        let response = ui.add(egui::TextEdit::singleline(i).hint_text(hint));
+                        if !focus_gained && *gain_focus {
+                            response.request_focus();
+                            focus_gained = true;
+                            *gain_focus = false;
+                        }
                     }
                     for i in &mut *words_to_guess {
-                        ui.add(egui::TextEdit::singleline(i));
+                        let response = ui.add(egui::TextEdit::singleline(i));
+                        if !focus_gained && *gain_focus {
+                            response.request_focus();
+                            focus_gained = true;
+                            *gain_focus = false;
+                        }
                     }
                     if ui.button("Check").clicked() {
                         let mut words_to_type_result = Vec::new();
@@ -746,6 +785,7 @@ mod gui {
                             known_words: correct_answer.known_words.clone(),
                             words_to_type: words_to_type_result,
                             words_to_guess: words_to_guess_result,
+                            gain_focus: true,
                         };
                     }
                 }
@@ -754,6 +794,7 @@ mod gui {
                     known_words,
                     words_to_type,
                     words_to_guess,
+                    gain_focus,
                 } => {
                     ui.label(format!("Words remains: {}", self.to_type_today.len()));
                     ui.label(format!("Word: {}", word));
@@ -782,7 +823,12 @@ mod gui {
                         }
                     });
 
-                    if ui.button("Next").clicked() {
+                    let response = ui.add(Button::new("Next"));
+                    if *gain_focus {
+                        response.request_focus();
+                        *gain_focus = false;
+                    }
+                    if response.clicked() {
                         self.pick_current_type(words, today);
                     }
                 }
