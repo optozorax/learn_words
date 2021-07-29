@@ -58,16 +58,8 @@ impl WordStatus {
     }
 }
 
-/// Все слова в программе, это используется для хранения информации
-struct WordsSaved(BTreeMap<String, WordStatus>);
-
-/// Все слова в программе, это используется для вычислений
-struct WordsOptimized {
-    all: BTreeMap<String, Vec<WordStatus>>,
-
-    /// Известные, мусорные, выученные, добавленные слова, необходимо для фильтрации после добавления слова
-    not_show: BTreeSet<String>,
-}
+/// Все слова в программе
+struct Words(BTreeMap<String, WordStatus>);
 
 enum WordsToAdd {
     KnowPreviously,
@@ -84,21 +76,7 @@ struct WordsToLearn {
     words_to_guess: Vec<String>,
 }
 
-impl WordsOptimized {
-    fn new(saved: WordsSaved) -> Self {
-        // to_type_today shuffle'ится после создания
-        todo!()
-    }
-
-    fn save(&self) -> WordsSaved {
-        //self.all.clone()
-        todo!()
-    }
-
-    fn is_unknown_word(&self, word: &str) -> bool {
-        todo!()
-    }
-
+impl Words {
     fn add_word(&mut self, word: String, info: WordsToAdd, settings: &Settings) {
         // Слово добавляется не только word->translations, а ещё 
         todo!()
@@ -142,13 +120,103 @@ mod gui {
     use super::*;
 
     struct Program {
+        data: Words,
+        /// Известные, мусорные, выученные, добавленные слова, необходимо для фильтрации после добавления слова
+        known_words: BTreeSet<String>,
         learn_window: LearnWordsWindow,
-
+        load_text_window: Option<LoadTextWindow>,
+        add_words_window: Option<AddWordsWindow>,
+        add_custom_words_window: Option<AddCustomWordsWindow>
     }
 
+    enum ProgramAction {
+        Save,
+    }
+
+    impl Program {
+        fn new(words: Words) -> Self {
+            // так же вычисляет все слова что сегодня надо изучить
+            todo!()
+        }
+
+        fn ui(&mut self, ctx: &CtxRef, known_words: &BTreeSet<String>) -> Option<ProgramAction> {
+            todo!()
+        }
+    }
+
+    struct LoadTextWindow {
+        load_subtitles: bool,
+        text: Result<String, String>,
+    }
+
+    enum LoadTextAction {
+        CloseSelf,
+        CreateAddWordWindow(Vec<String>),
+    }
+
+    impl LoadTextWindow {
+        fn new(load_subtitles: bool) -> Self {
+            // Считать текст из буфера обмена сразу, если получилось вернуть Ok(...), иначе Err(...), на второй вариант пользователь должен сам ввести текст или вставить его из буфера обмена
+            todo!()
+        }
+
+        fn ui(&mut self, ctx: &CtxRef, known_words: &BTreeSet<String>) -> Option<LoadTextAction> {
+            // Есть кнопка "обновить информацию из буфера обмена"
+            todo!()
+        }
+    }
+
+    struct AddWordsWindow {
+        words: Vec<String>,
+        translations: String,
+    }
+
+    enum AddWordsAction {
+        CloseSelf,
+        AddWord(WordsToAdd),
+    }
+
+    impl AddWordsWindow {
+        fn new(words: Vec<String>) -> Self {
+            todo!()
+        }
+
+        fn ui(&mut self, ctx: &CtxRef) -> Option<AddWordsAction> {
+            todo!()
+        }
+    }
+
+    struct AddCustomWordsWindow {
+        word: String,
+        translations: String,
+    }
+
+    impl AddCustomWordsWindow {
+        fn new(words: Vec<String>) -> Self {
+            todo!()
+        }
+
+        fn ui(&mut self, ctx: &CtxRef, known_words: &BTreeSet<String>) -> Option<AddWordsAction> {
+            todo!()
+        }
+    }
+
+    // Это окно нельзя закрыть
     struct LearnWordsWindow {
         /// То что надо ввести несколько раз повторяется, слово повторяется максимальное число из всех под-слов что с ним связано. Если слово уже известно, то надо 
         to_type_today: Vec<String>,
+        current_type: Option<WordsToLearn>,
+    }
+
+    impl LearnWordsWindow {
+        fn new(words: &Words, today: Day) -> Self {
+            // to_type_today shuffle'ится после создания
+            todo!()
+        }
+
+        fn ui(&mut self, ctx: &CtxRef, words: &mut Words) {
+            todo!()
+        }
     }
 
     fn word_to_add(ui: &mut Ui, word: &mut String, translations: &mut String) -> Option<WordsToAdd> {
