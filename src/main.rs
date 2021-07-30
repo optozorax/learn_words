@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 /// День
-#[derive(Serialize, Deserialize, Clone, Copy)]
+#[derive(Serialize, Deserialize, Clone, Copy, Ord, PartialOrd, Eq, PartialEq)]
 pub struct Day(u64);
 
 impl std::fmt::Debug for Day {
@@ -85,7 +85,7 @@ enum WordStatus {
         learns: Vec<LearnType>,
 
         /// Количество learns, которое уже преодолено
-        current_level: usize,
+        current_level: u8,
 
         /// Статистика
         stats: TypingStats,
@@ -101,7 +101,7 @@ enum WordStatus {
 }
 
 impl WordStatus {
-    fn register_attempt(&mut self, correct: bool, today: Day) {
+    fn register_attempt(&mut self, correct: bool, today: Day, day_stats: &mut DayStatistics) {
         use WordStatus::*;
         match self {
             KnowPreviously | TrashWord | Learned { .. } => unreachable!(),
@@ -114,8 +114,10 @@ impl WordStatus {
             } => {
                 if correct {
                     stats.right += 1;
+                    day_stats.attempts.right += 1;
                 } else {
                     stats.wrong += 1;
+                    day_stats.attempts.wrong += 1;
                 }
 
                 let mut registered = false;
@@ -198,7 +200,14 @@ impl Words {
         self.0.iter().map(|(word, _)| word.clone()).collect()
     }
 
-    fn add_word(&mut self, word: String, info: WordsToAdd, settings: &Settings, today: Day) {
+    fn add_word(
+        &mut self,
+        word: String,
+        info: WordsToAdd,
+        settings: &Settings,
+        today: Day,
+        day_stats: &mut DayStatistics,
+    ) {
         use WordsToAdd::*;
         let entry = self.0.entry(word.clone()).or_insert_with(Vec::new);
         match info {
@@ -213,6 +222,7 @@ impl Words {
                         current_level: 0,
                         stats: Default::default(),
                     });
+                    day_stats.new_unknown_words_count += 1;
                 }
                 for translation in translations {
                     self.0
@@ -282,14 +292,48 @@ impl Words {
             .collect()
     }
 
-    fn register_attempt(&mut self, word: &str, translation: &str, correct: bool, today: Day) {
+    fn register_attempt(
+        &mut self,
+        word: &str,
+        translation: &str,
+        correct: bool,
+        today: Day,
+        day_stats: &mut DayStatistics,
+    ) {
         for i in self.0.get_mut(word).unwrap() {
             if i.has_translation(translation) {
-                i.register_attempt(correct, today);
+                i.register_attempt(correct, today, day_stats);
                 return;
             }
         }
         unreachable!()
+    }
+
+    fn calculate_word_statistics(&self) -> BTreeMap<WordType, usize> {
+        let mut result = BTreeMap::new();
+        for i in self.0.values().flatten() {
+            use WordStatus::*;
+            match i {
+                KnowPreviously => *result.entry(WordType::Known).or_insert(0) += 1,
+                TrashWord => *result.entry(WordType::Trash).or_insert(0) += 1,
+                ToLearn { current_level, .. } => {
+                    *result.entry(WordType::Level(*current_level)).or_insert(0) += 1
+                }
+                Learned { .. } => *result.entry(WordType::Learned).or_insert(0) += 1,
+            }
+        }
+        result
+    }
+
+    fn calculate_attempts_statistics(&self) -> TypingStats {
+        let mut result = TypingStats::default();
+        for i in self.0.values().flatten() {
+            if let WordStatus::ToLearn { stats, .. } = i {
+                result.right += stats.right;
+                result.wrong += stats.wrong;
+            }
+        }
+        result
     }
 }
 
@@ -352,34 +396,59 @@ fn write_clipboard(s: &str) {
     miniquad::clipboard::set(unsafe { get_internal_gl().quad_context }, s)
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, Ord, PartialOrd, Eq, PartialEq)]
+pub enum WordType {
+    Known,
+    Trash,
+    Level(u8),
+    Learned,
+}
+
+#[derive(Default, Serialize, Deserialize, Clone, Debug)]
+pub struct DayStatistics {
+    attempts: TypingStats,
+    new_unknown_words_count: usize,
+    word_count_by_level: BTreeMap<WordType, usize>,
+    working_time: f64,
+}
+
+#[derive(Default, Serialize, Deserialize, Clone, Debug)]
+pub struct Statistics {
+    by_day: BTreeMap<Day, DayStatistics>,
+}
+
 mod gui {
     use super::*;
     use egui::*;
 
     pub struct Program {
-        data: Words,
+        words: Words,
+        settings: Settings,
+        stats: Statistics,
+
         /// Известные, мусорные, выученные, добавленные слова, необходимо для фильтрации после добавления слова
         known_words: BTreeSet<String>,
         learn_window: LearnWordsWindow,
         load_text_window: Option<LoadTextWindow>,
         add_words_window: Option<AddWordsWindow>,
         add_custom_words_window: Option<AddCustomWordsWindow>,
-        settings: Settings,
     }
 
     impl Program {
-        pub fn new(words: Words, settings: Settings, today: Day) -> Self {
+        pub fn new(words: Words, settings: Settings, stats: Statistics, today: Day) -> Self {
             let learn_window = LearnWordsWindow::new(&words, today);
             let known_words = words.calculate_known_words();
 
             Self {
-                data: words,
+                words,
+                settings,
+                stats,
+
                 known_words,
                 learn_window,
                 load_text_window: None,
                 add_words_window: None,
                 add_custom_words_window: None,
-                settings,
             }
         }
 
@@ -387,22 +456,29 @@ mod gui {
             &self.settings
         }
 
-        pub fn save(&self) {
+        pub fn save(&mut self, today: Day, working_time: f64) {
+            self.update_day_statistics(today, working_time);
             std::fs::write(
                 "learn_words.data",
-                ron::to_string(&(&self.data, &self.settings)).unwrap(),
+                ron::to_string(&(&self.words, &self.settings, &self.stats)).unwrap(),
             )
             .unwrap();
         }
 
-        pub fn load() -> (Words, Settings) {
+        pub fn load() -> (Words, Settings, Statistics) {
             std::fs::read_to_string("learn_words.data")
-                .map(|x| ron::from_str::<(Words, Settings)>(&x).unwrap())
+                .map(|x| ron::from_str::<(Words, Settings, Statistics)>(&x).unwrap())
                 .unwrap_or_default()
         }
 
-        pub fn ui(&mut self, ctx: &CtxRef, today: Day) {
-            TopBottomPanel::top("my top").show(ctx, |ui| {
+        pub fn update_day_statistics(&mut self, today: Day, working_time: f64) {
+            let today = &mut self.stats.by_day.entry(today).or_default();
+            today.working_time = working_time;
+            today.word_count_by_level = self.words.calculate_word_statistics();
+        }
+
+        pub fn ui(&mut self, ctx: &CtxRef, today: Day, working_time: f64) {
+            TopBottomPanel::top("top").show(ctx, |ui| {
                 menu::bar(ui, |ui| {
                     menu::menu(ui, "Add words", |ui| {
                         if ui.button("From text").clicked() {
@@ -416,19 +492,31 @@ mod gui {
                         }
                     });
                     if ui.button("Save").clicked() {
-                        self.save();
+                        self.save(today, working_time);
                     }
                     if ui.button("Debug").clicked() {
                         println!("------------------------------");
                         println!("------------------------------");
                         println!("------------------------------");
-                        dbg!(&self.data);
+                        dbg!(&self.words);
+                        dbg!(&self.settings);
+                        dbg!(&self.stats);
                     }
+                    menu::menu(ui, "Statistics", |ui| {
+                        if ui.button("Full").clicked() {}
+                        if ui.button("Attempts by day").clicked() {}
+                        if ui.button("Words by day").clicked() {}
+                    });
                     if ui.button("About").clicked() {}
                 });
             });
 
-            self.learn_window.ui(ctx, &mut self.data, today);
+            self.learn_window.ui(
+                ctx,
+                &mut self.words,
+                today,
+                &mut self.stats.by_day.entry(today).or_default(),
+            );
             if let Some(window) = &mut self.load_text_window {
                 use LoadTextAction::*;
                 match window.ui(ctx, &self.known_words) {
@@ -445,10 +533,16 @@ mod gui {
                 match window.ui(ctx) {
                     Some(CloseSelf) => {
                         self.add_words_window = None;
-                        self.learn_window.update(&self.data, today);
+                        self.learn_window.update(&self.words, today);
                     }
                     Some(AddWord(word, to_add)) => {
-                        self.data.add_word(word, to_add, &self.settings, today);
+                        self.words.add_word(
+                            word,
+                            to_add,
+                            &self.settings,
+                            today,
+                            &mut self.stats.by_day.entry(today).or_default(),
+                        );
                     }
                     None => {}
                 }
@@ -458,14 +552,30 @@ mod gui {
                 match window.ui(ctx) {
                     Some(CloseSelf) => {
                         self.add_custom_words_window = None;
-                        self.learn_window.update(&self.data, today);
+                        self.learn_window.update(&self.words, today);
                     }
                     Some(AddWord(word, to_add)) => {
-                        self.data.add_word(word, to_add, &self.settings, today);
+                        self.words.add_word(
+                            word,
+                            to_add,
+                            &self.settings,
+                            today,
+                            &mut self.stats.by_day.entry(today).or_default(),
+                        );
                     }
                     None => {}
                 }
             }
+
+            egui::TopBottomPanel::bottom("bottom").show(ctx, |ui| {
+                let today = &self.stats.by_day.entry(today).or_default();
+                ui.monospace(format!(
+                    "Working time: {:6.1} | Attempts: {:4} | New words: {:4}",
+                    working_time,
+                    today.attempts.right + today.attempts.wrong,
+                    today.new_unknown_words_count,
+                ));
+            });
         }
     }
 
@@ -722,7 +832,13 @@ mod gui {
             self.pick_current_type(words, today);
         }
 
-        fn ui(&mut self, ctx: &CtxRef, words: &mut Words, today: Day) {
+        fn ui(
+            &mut self,
+            ctx: &CtxRef,
+            words: &mut Words,
+            today: Day,
+            day_stats: &mut DayStatistics,
+        ) {
             egui::Window::new("Learn words").show(ctx, |ui| match &mut self.current {
                 LearnWords::None => {
                     ui.label("🎉🎉🎉 Everything is learned for today! 🎉🎉🎉");
@@ -771,7 +887,7 @@ mod gui {
                             .zip(words_to_type.iter_mut())
                         {
                             let correct = answer == i;
-                            words.register_attempt(word, answer, correct, today);
+                            words.register_attempt(word, answer, correct, today, day_stats);
                             if correct {
                                 words_to_type_result.push(Ok(answer.clone()));
                             } else {
@@ -788,12 +904,18 @@ mod gui {
 
                         for typed in &*words_to_guess {
                             if let Some(position) = corrects.iter().position(|x| x == typed) {
-                                words.register_attempt(word, &corrects[position], true, today);
+                                words.register_attempt(
+                                    word,
+                                    &corrects[position],
+                                    true,
+                                    today,
+                                    day_stats,
+                                );
                                 corrects.remove(position);
                                 words_to_type_result.push(Ok(typed.clone()));
                             } else {
                                 let answer = answers.remove(0);
-                                words.register_attempt(word, &answer, false, today);
+                                words.register_attempt(word, &answer, false, today, day_stats);
                                 words_to_guess_result.push(Err((answer, typed.clone())));
                             }
                         }
@@ -1008,9 +1130,9 @@ async fn main() {
     #[cfg(not(target_arch = "wasm32"))]
     color_backtrace::install();
 
-    let (words, settings) = gui::Program::load();
+    let (words, settings, stats) = gui::Program::load();
 
-    let mut program = gui::Program::new(words, settings, today);
+    let mut program = gui::Program::new(words, settings, stats, today);
 
     let mut pause_detector = PauseDetector::new();
 
@@ -1021,13 +1143,7 @@ async fn main() {
         clear_background(BLACK);
 
         egui_macroquad::ui(|ctx| {
-            program.ui(ctx, today);
-            egui::TopBottomPanel::bottom("data").show(ctx, |ui| {
-                ui.label(format!(
-                    "Working time: {:.1}",
-                    pause_detector.get_working_time()
-                ));
-            });
+            program.ui(ctx, today, pause_detector.get_working_time());
         });
         egui_macroquad::draw();
 
