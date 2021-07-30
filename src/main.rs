@@ -468,6 +468,11 @@ mod gui {
         load_text_window: ClosableWindow<LoadTextWindow>,
         add_words_window: ClosableWindow<AddWordsWindow>,
         add_custom_words_window: ClosableWindow<AddCustomWordsWindow>,
+
+        full_stats_window: ClosableWindow<FullStatsWindow>,
+        percentage_graph_window: ClosableWindow<PercentageGraphWindow>,
+
+        import_window: ClosableWindow<ImportWindow>,
     }
 
     impl Program {
@@ -485,6 +490,11 @@ mod gui {
                 load_text_window: Default::default(),
                 add_words_window: Default::default(),
                 add_custom_words_window: Default::default(),
+
+                full_stats_window: Default::default(),
+                percentage_graph_window: Default::default(),
+
+                import_window: Default::default(),
             }
         }
 
@@ -492,19 +502,23 @@ mod gui {
             &self.settings
         }
 
-        pub fn save(&mut self, today: Day, working_time: f64) {
+        pub fn save_to_string(&mut self, today: Day, working_time: f64) -> String {
             self.update_day_statistics(today, working_time);
-            std::fs::write(
-                "learn_words.data",
-                ron::to_string(&(&self.words, &self.settings, &self.stats)).unwrap(),
-            )
-            .unwrap();
+            ron::to_string(&(&self.words, &self.settings, &self.stats)).unwrap()
+        }
+
+        pub fn save(&mut self, today: Day, working_time: f64) {
+            std::fs::write("learn_words.data", self.save_to_string(today, working_time)).unwrap();
         }
 
         pub fn load() -> (Words, Settings, Statistics) {
             std::fs::read_to_string("learn_words.data")
-                .map(|x| ron::from_str::<(Words, Settings, Statistics)>(&x).unwrap())
+                .map(|x| Self::load_from_string(&x).unwrap())
                 .unwrap_or_default()
+        }
+
+        pub fn load_from_string(s: &str) -> Result<(Words, Settings, Statistics), ron::Error> {
+            ron::from_str::<(Words, Settings, Statistics)>(s)
         }
 
         pub fn update_day_statistics(&mut self, today: Day, working_time: f64) {
@@ -516,6 +530,18 @@ mod gui {
         pub fn ui(&mut self, ctx: &CtxRef, today: Day, working_time: f64) {
             TopBottomPanel::top("top").show(ctx, |ui| {
                 menu::bar(ui, |ui| {
+                    menu::menu(ui, "Data", |ui| {
+                        if ui.button("Export to clipboard").clicked() {
+                            write_clipboard(&self.save_to_string(today, working_time));
+                        }
+                        if ui.button("Import").clicked() {
+                            self.import_window = ClosableWindow::new(ImportWindow::new());
+                        }
+                        ui.separator();
+                        if ui.button("Save").clicked() {
+                            self.save(today, working_time);
+                        }
+                    });
                     menu::menu(ui, "Add words", |ui| {
                         if ui.button("From text").clicked() {
                             self.load_text_window = ClosableWindow::new(LoadTextWindow::new(false));
@@ -527,21 +553,99 @@ mod gui {
                             self.add_custom_words_window = ClosableWindow::new(Default::default());
                         }
                     });
-                    if ui.button("Save").clicked() {
-                        self.save(today, working_time);
-                    }
-                    if ui.button("Debug").clicked() {
-                        println!("------------------------------");
-                        println!("------------------------------");
-                        println!("------------------------------");
-                        dbg!(&self.words);
-                        dbg!(&self.settings);
-                        dbg!(&self.stats);
-                    }
                     menu::menu(ui, "Statistics", |ui| {
-                        if ui.button("Full").clicked() {}
-                        if ui.button("Attempts by day").clicked() {}
-                        if ui.button("Words by day").clicked() {}
+                        if ui.button("Full").clicked() {
+                            self.full_stats_window = ClosableWindow::new(FullStatsWindow {
+                                attempts: self.words.calculate_attempts_statistics(),
+                                word_count_by_level: self.words.calculate_word_statistics(),
+                            });
+                        }
+                        if ui.button("Attempts by day").clicked() {
+                            self.update_day_statistics(today, working_time);
+                            self.percentage_graph_window =
+                                ClosableWindow::new(PercentageGraphWindow {
+                                    name: "Attempts by day",
+                                    values: self
+                                        .stats
+                                        .by_day
+                                        .iter()
+                                        .map(|(k, v)| {
+                                            (
+                                                *k,
+                                                vec![
+                                                    v.attempts.right as f64,
+                                                    v.attempts.wrong as f64,
+                                                ],
+                                            )
+                                        })
+                                        .collect(),
+                                    names: vec![
+                                        "Right attempts".to_string(),
+                                        "Wrong attempts".to_string(),
+                                    ],
+                                    stackplot: false,
+                                });
+                        }
+                        if ui.button("Time by day").clicked() {
+                            self.update_day_statistics(today, working_time);
+                            self.percentage_graph_window =
+                                ClosableWindow::new(PercentageGraphWindow {
+                                    name: "Time by day",
+                                    values: self
+                                        .stats
+                                        .by_day
+                                        .iter()
+                                        .map(|(k, v)| (*k, vec![v.working_time]))
+                                        .collect(),
+                                    names: vec!["Working time".to_string()],
+                                    stackplot: false,
+                                });
+                        }
+                        if ui.button("Words by day").clicked() {
+                            self.update_day_statistics(today, working_time);
+                            let available_types: BTreeSet<WordType> = self
+                                .stats
+                                .by_day
+                                .values()
+                                .map(|x| x.word_count_by_level.keys().cloned())
+                                .flatten()
+                                .collect();
+                            use WordType::*;
+                            self.percentage_graph_window =
+                                ClosableWindow::new(PercentageGraphWindow {
+                                    name: "Words by day",
+                                    values: self
+                                        .stats
+                                        .by_day
+                                        .iter()
+                                        .map(|(k, v)| {
+                                            (
+                                                *k,
+                                                available_types
+                                                    .iter()
+                                                    .map(|x| {
+                                                        v.word_count_by_level
+                                                            .get(x)
+                                                            .copied()
+                                                            .unwrap_or(0)
+                                                            as f64
+                                                    })
+                                                    .collect(),
+                                            )
+                                        })
+                                        .collect(),
+                                    names: available_types
+                                        .iter()
+                                        .map(|x| match x {
+                                            Known => "Known".to_string(),
+                                            Trash => "Trash".to_string(),
+                                            Level(l) => format!("Level {}", l),
+                                            Learned => "Learned".to_string(),
+                                        })
+                                        .collect(),
+                                    stackplot: false,
+                                });
+                        }
                     });
                     if ui.button("About").clicked() {}
                 });
@@ -565,6 +669,24 @@ mod gui {
                     false
                 }
             });
+
+            let window = &mut self.import_window;
+            let words = &mut self.words;
+            let settings = &mut self.settings;
+            let stats = &mut self.stats;
+            let closed = window.ui(ctx, |t, ui| {
+                if let Some((words1, settings1, stats1)) = t.ui(ui) {
+                    *words = words1;
+                    *settings = settings1;
+                    *stats = stats1;
+                    true
+                } else {
+                    false
+                }
+            });
+            if closed {
+                self.learn_window.update(&self.words, today);
+            }
 
             let window = &mut self.add_words_window;
             let settings = &self.settings;
@@ -608,11 +730,36 @@ mod gui {
                 self.learn_window.update(&self.words, today);
             }
 
+            self.full_stats_window.ui(ctx, |t, ui| {
+                t.ui(ui);
+                false
+            });
+
+            self.percentage_graph_window.ui(ctx, |t, ui| {
+                t.ui(ui);
+                false
+            });
+
             egui::TopBottomPanel::bottom("bottom").show(ctx, |ui| {
                 let today = &self.stats.by_day.entry(today).or_default();
                 ui.monospace(format!(
-                    "Working time: {:6.1} | Attempts: {:4} | New words: {:4}",
-                    working_time,
+                    "Working time: {} | Attempts: {:4} | New words: {:4}",
+                    if working_time > 3600. {
+                        format!(
+                            "{:2}:{:02}:{:02}",
+                            working_time as u32 / 3600,
+                            working_time as u32 % 3600 / 60,
+                            working_time as u32 % 60
+                        )
+                    } else if working_time > 60. {
+                        format!(
+                            "   {:02}:{:02}",
+                            working_time as u32 / 60,
+                            working_time as u32 % 60
+                        )
+                    } else {
+                        format!("      {:02}", working_time as u32)
+                    },
                     today.attempts.right + today.attempts.wrong,
                     today.new_unknown_words_count,
                 ));
@@ -629,11 +776,13 @@ mod gui {
     impl WindowTrait for LoadTextWindow {
         fn create_window(&self) -> Window<'static> {
             Window::new(if self.load_subtitles {
-                "Load words from subtitles"
+                "Words from subs"
             } else {
-                "Load words from text"
+                "Words from text"
             })
             .scroll(false)
+            .fixed_size((200., 100.))
+            .collapsible(false)
         }
     }
 
@@ -675,23 +824,76 @@ mod gui {
                     self.text = read_clipboard().ok_or_else(String::new);
                 }
             });
+            ui.separator();
             match &mut self.text {
                 Ok(text) => {
-                    if text.len() > 50 {
-                        ui.label(format!(
-                            "{}... {:.1} KB",
-                            text.chars().take(50).collect::<String>(),
-                            text.len() as f64 / 1024.0
-                        ));
-                    } else {
-                        ui.label(&*text);
-                    }
+                    text_preview(ui, text);
                 }
                 Err(text) => {
                     ui.text_edit_multiline(text);
                 }
             }
             if let Some(error) = &self.subtitles_error {
+                ui.separator();
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.;
+                    ui.add(Label::new("Error: ").text_color(Color32::RED).monospace());
+                    ui.monospace(error);
+                });
+            }
+            action
+        }
+    }
+
+    struct ImportWindow {
+        text: Result<String, String>,
+        error: Option<String>,
+    }
+
+    impl WindowTrait for ImportWindow {
+        fn create_window(&self) -> Window<'static> {
+            Window::new("Import data")
+                .scroll(false)
+                .fixed_size((200., 100.))
+                .collapsible(false)
+        }
+    }
+
+    impl ImportWindow {
+        fn new() -> Self {
+            Self {
+                text: read_clipboard().ok_or_else(String::new),
+                error: None,
+            }
+        }
+
+        fn ui(&mut self, ui: &mut Ui) -> Option<(Words, Settings, Statistics)> {
+            let mut action = None;
+            ui.horizontal(|ui| {
+                if ui.button("Use this text").clicked() {
+                    let text = self.text.as_ref().unwrap_or_else(|x| x);
+
+                    match Program::load_from_string(text) {
+                        Ok(result) => action = Some(result),
+                        Err(error) => {
+                            self.error = Some(format!("{:#?}", error));
+                        }
+                    }
+                }
+                if ui.button("Update clipboard").clicked() {
+                    self.text = read_clipboard().ok_or_else(String::new);
+                }
+            });
+            ui.separator();
+            match &mut self.text {
+                Ok(text) => {
+                    text_preview(ui, text);
+                }
+                Err(text) => {
+                    ui.text_edit_multiline(text);
+                }
+            }
+            if let Some(error) = &self.error {
                 ui.separator();
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.;
@@ -710,7 +912,10 @@ mod gui {
 
     impl WindowTrait for AddWordsWindow {
         fn create_window(&self) -> Window<'static> {
-            Window::new("Add words").scroll(false)
+            Window::new("Add words")
+                .scroll(false)
+                .fixed_size((200., 100.))
+                .collapsible(false)
         }
     }
 
@@ -745,7 +950,10 @@ mod gui {
 
     impl WindowTrait for AddCustomWordsWindow {
         fn create_window(&self) -> Window<'static> {
-            Window::new("Add words").scroll(false)
+            Window::new("Add words")
+                .scroll(false)
+                .fixed_size((200., 100.))
+                .collapsible(false)
         }
     }
 
@@ -759,6 +967,92 @@ mod gui {
                 action = Some((word, to_add));
             }
             action
+        }
+    }
+
+    #[derive(Default)]
+    struct FullStatsWindow {
+        attempts: TypingStats,
+        word_count_by_level: BTreeMap<WordType, usize>,
+    }
+
+    impl WindowTrait for FullStatsWindow {
+        fn create_window(&self) -> Window<'static> {
+            Window::new("Full statistics")
+                .scroll(false)
+                .fixed_size((150., 100.))
+                .collapsible(false)
+        }
+    }
+
+    impl FullStatsWindow {
+        fn ui(&mut self, ui: &mut Ui) {
+            ui.label(format!(
+                "Attempts: {}",
+                self.attempts.right + self.attempts.wrong,
+            ));
+            ui.label(format!("Correct: {}", self.attempts.right,));
+            ui.label(format!("Wrong: {}", self.attempts.wrong,));
+            ui.separator();
+            ui.label("Count of words:");
+            for (kind, count) in &self.word_count_by_level {
+                use WordType::*;
+                match kind {
+                    Known => ui.label(format!("Known: {}", count)),
+                    Trash => ui.label(format!("Trash: {}", count)),
+                    Level(l) => ui.label(format!("Level {}: {}", l, count)),
+                    Learned => ui.label(format!("Learned: {}", count)),
+                };
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct PercentageGraphWindow {
+        name: &'static str,
+        values: BTreeMap<Day, Vec<f64>>,
+        names: Vec<String>,
+        stackplot: bool,
+    }
+
+    impl WindowTrait for PercentageGraphWindow {
+        fn create_window(&self) -> Window<'static> {
+            Window::new(self.name).scroll(false).collapsible(false)
+        }
+    }
+
+    impl PercentageGraphWindow {
+        fn ui(&mut self, ui: &mut Ui) {
+            ui.checkbox(&mut self.stackplot, "Stackplot");
+            use egui::plot::*;
+            let lines: Vec<_> = (0..self.values.values().next().unwrap().len())
+                .map(|i| {
+                    Line::new(Values::from_values(
+                        self.values
+                            .iter()
+                            .map(|(day, arr)| {
+                                Value::new(
+                                    day.0 as f64,
+                                    if self.stackplot {
+                                        arr.iter().take(i + 1).sum::<f64>()
+                                    } else {
+                                        arr[i]
+                                    },
+                                )
+                            })
+                            .collect(),
+                    ))
+                })
+                .collect();
+
+            let mut plot = Plot::new("percentage")
+                .allow_zoom(false)
+                .allow_drag(false)
+                .legend(Legend::default().position(Corner::LeftTop));
+            for (line, name) in lines.into_iter().zip(self.names.iter()) {
+                plot = plot.line(line.name(name));
+            }
+            ui.add(plot);
         }
     }
 
@@ -844,140 +1138,144 @@ mod gui {
             today: Day,
             day_stats: &mut DayStatistics,
         ) {
-            egui::Window::new("Learn words").show(ctx, |ui| match &mut self.current {
-                LearnWords::None => {
-                    ui.label("🎉🎉🎉 Everything is learned for today! 🎉🎉🎉");
-                }
-                LearnWords::Typing {
-                    word,
-                    correct_answer,
-                    words_to_type,
-                    words_to_guess,
-                    gain_focus,
-                } => {
-                    ui.label(format!("Words remains: {}", self.to_type_today.len()));
-                    ui.label(format!("Word: {}", word));
+            egui::Window::new("Learn words")
+                .fixed_size((300., 100.))
+                .collapsible(false)
+                .scroll(false)
+                .show(ctx, |ui| match &mut self.current {
+                    LearnWords::None => {
+                        ui.label("🎉🎉🎉 Everything is learned for today! 🎉🎉🎉");
+                    }
+                    LearnWords::Typing {
+                        word,
+                        correct_answer,
+                        words_to_type,
+                        words_to_guess,
+                        gain_focus,
+                    } => {
+                        ui.label(format!("Words remains: {}", self.to_type_today.len()));
+                        ui.label(format!("Word: {}", word));
 
-                    let mut focus_gained = false;
+                        let mut focus_gained = false;
 
-                    for i in &mut correct_answer.known_words {
-                        ui.add(egui::TextEdit::singleline(i).enabled(false));
-                    }
-                    for (hint, i) in correct_answer
-                        .words_to_type
-                        .iter()
-                        .zip(words_to_type.iter_mut())
-                    {
-                        let response = ui.add(egui::TextEdit::singleline(i).hint_text(hint));
-                        if !focus_gained && *gain_focus {
-                            response.request_focus();
-                            focus_gained = true;
-                            *gain_focus = false;
+                        for i in &mut correct_answer.known_words {
+                            ui.add(egui::TextEdit::singleline(i).enabled(false));
                         }
-                    }
-                    for i in &mut *words_to_guess {
-                        let response = ui.add(egui::TextEdit::singleline(i));
-                        if !focus_gained && *gain_focus {
-                            response.request_focus();
-                            focus_gained = true;
-                            *gain_focus = false;
-                        }
-                    }
-                    if ui.button("Check").clicked() {
-                        let mut words_to_type_result = Vec::new();
-                        let mut words_to_guess_result = Vec::new();
-                        for (answer, i) in correct_answer
+                        for (hint, i) in correct_answer
                             .words_to_type
                             .iter()
                             .zip(words_to_type.iter_mut())
                         {
-                            let correct = answer == i;
-                            words.register_attempt(word, answer, correct, today, day_stats);
-                            if correct {
-                                words_to_type_result.push(Ok(answer.clone()));
-                            } else {
-                                words_to_guess_result.push(Err((answer.clone(), i.clone())));
+                            let response = ui.add(egui::TextEdit::singleline(i).hint_text(hint));
+                            if !focus_gained && *gain_focus {
+                                response.request_focus();
+                                focus_gained = true;
+                                *gain_focus = false;
                             }
                         }
-                        let mut answers = correct_answer.words_to_guess.clone();
-                        let mut corrects = Vec::new();
-                        for typed in &*words_to_guess {
-                            if let Some(position) = answers.iter().position(|x| x == typed) {
-                                corrects.push(answers.remove(position));
+                        for i in &mut *words_to_guess {
+                            let response = ui.add(egui::TextEdit::singleline(i));
+                            if !focus_gained && *gain_focus {
+                                response.request_focus();
+                                focus_gained = true;
+                                *gain_focus = false;
                             }
                         }
-
-                        for typed in &*words_to_guess {
-                            if let Some(position) = corrects.iter().position(|x| x == typed) {
-                                words.register_attempt(
-                                    word,
-                                    &corrects[position],
-                                    true,
-                                    today,
-                                    day_stats,
-                                );
-                                corrects.remove(position);
-                                words_to_type_result.push(Ok(typed.clone()));
-                            } else {
-                                let answer = answers.remove(0);
-                                words.register_attempt(word, &answer, false, today, day_stats);
-                                words_to_guess_result.push(Err((answer, typed.clone())));
-                            }
-                        }
-
-                        self.current = LearnWords::Checked {
-                            word: word.clone(),
-                            known_words: correct_answer.known_words.clone(),
-                            words_to_type: words_to_type_result,
-                            words_to_guess: words_to_guess_result,
-                            gain_focus: true,
-                        };
-                    }
-                }
-                LearnWords::Checked {
-                    word,
-                    known_words,
-                    words_to_type,
-                    words_to_guess,
-                    gain_focus,
-                } => {
-                    ui.label(format!("Words remains: {}", self.to_type_today.len()));
-                    ui.label(format!("Word: {}", word));
-
-                    for i in known_words {
-                        ui.add(egui::TextEdit::singleline(i).enabled(false));
-                    }
-
-                    Grid::new("matrix").striped(true).show(ui, |ui| {
-                        for word in words_to_type.iter_mut().chain(words_to_guess.iter_mut()) {
-                            match word {
-                                Ok(word) => {
-                                    with_green_color(ui, |ui| {
-                                        ui.add(egui::TextEdit::singleline(word).enabled(false));
-                                    });
-                                    ui.label(format!("✅ {}", word));
-                                }
-                                Err((answer, word)) => {
-                                    with_red_color(ui, |ui| {
-                                        ui.add(egui::TextEdit::singleline(word).enabled(false));
-                                    });
-                                    ui.label(format!("❌ {}", answer));
+                        if ui.button("Check").clicked() {
+                            let mut words_to_type_result = Vec::new();
+                            let mut words_to_guess_result = Vec::new();
+                            for (answer, i) in correct_answer
+                                .words_to_type
+                                .iter()
+                                .zip(words_to_type.iter_mut())
+                            {
+                                let correct = answer == i;
+                                words.register_attempt(word, answer, correct, today, day_stats);
+                                if correct {
+                                    words_to_type_result.push(Ok(answer.clone()));
+                                } else {
+                                    words_to_guess_result.push(Err((answer.clone(), i.clone())));
                                 }
                             }
-                            ui.end_row();
-                        }
-                    });
+                            let mut answers = correct_answer.words_to_guess.clone();
+                            let mut corrects = Vec::new();
+                            for typed in &*words_to_guess {
+                                if let Some(position) = answers.iter().position(|x| x == typed) {
+                                    corrects.push(answers.remove(position));
+                                }
+                            }
 
-                    let response = ui.add(Button::new("Next"));
-                    if *gain_focus {
-                        response.request_focus();
-                        *gain_focus = false;
+                            for typed in &*words_to_guess {
+                                if let Some(position) = corrects.iter().position(|x| x == typed) {
+                                    words.register_attempt(
+                                        word,
+                                        &corrects[position],
+                                        true,
+                                        today,
+                                        day_stats,
+                                    );
+                                    corrects.remove(position);
+                                    words_to_type_result.push(Ok(typed.clone()));
+                                } else {
+                                    let answer = answers.remove(0);
+                                    words.register_attempt(word, &answer, false, today, day_stats);
+                                    words_to_guess_result.push(Err((answer, typed.clone())));
+                                }
+                            }
+
+                            self.current = LearnWords::Checked {
+                                word: word.clone(),
+                                known_words: correct_answer.known_words.clone(),
+                                words_to_type: words_to_type_result,
+                                words_to_guess: words_to_guess_result,
+                                gain_focus: true,
+                            };
+                        }
                     }
-                    if response.clicked() {
-                        self.pick_current_type(words, today);
+                    LearnWords::Checked {
+                        word,
+                        known_words,
+                        words_to_type,
+                        words_to_guess,
+                        gain_focus,
+                    } => {
+                        ui.label(format!("Words remains: {}", self.to_type_today.len()));
+                        ui.label(format!("Word: {}", word));
+
+                        for i in known_words {
+                            ui.add(egui::TextEdit::singleline(i).enabled(false));
+                        }
+
+                        Grid::new("matrix").striped(true).show(ui, |ui| {
+                            for word in words_to_type.iter_mut().chain(words_to_guess.iter_mut()) {
+                                match word {
+                                    Ok(word) => {
+                                        with_green_color(ui, |ui| {
+                                            ui.add(egui::TextEdit::singleline(word).enabled(false));
+                                        });
+                                        ui.label(format!("✅ {}", word));
+                                    }
+                                    Err((answer, word)) => {
+                                        with_red_color(ui, |ui| {
+                                            ui.add(egui::TextEdit::singleline(word).enabled(false));
+                                        });
+                                        ui.label(format!("❌ {}", answer));
+                                    }
+                                }
+                                ui.end_row();
+                            }
+                        });
+
+                        let response = ui.add(Button::new("Next"));
+                        if *gain_focus {
+                            response.request_focus();
+                            *gain_focus = false;
+                        }
+                        if response.clicked() {
+                            self.pick_current_type(words, today);
+                        }
                     }
-                }
-            });
+                });
         }
     }
 
@@ -1054,6 +1352,16 @@ mod gui {
             f,
         )
     }
+
+    fn text_preview(ui: &mut Ui, text: &str) {
+        if text.len() > 200 {
+            ui.monospace(format!("{}...", text.chars().take(200).collect::<String>()));
+            ui.separator();
+            ui.label(format!("Total size: {:.1} KB", text.len() as f64 / 1024.0));
+        } else {
+            ui.label(&*text);
+        }
+    }
 }
 
 fn window_conf() -> Conf {
@@ -1074,13 +1382,13 @@ struct PauseDetector {
 }
 
 impl PauseDetector {
-    fn new() -> Self {
+    fn new(time_today: f64) -> Self {
         Self {
             last_mouse_position: mouse_position(),
             pausing: false,
             time: get_time(),
             last_time: get_time(),
-            time_without_pauses: 0.,
+            time_without_pauses: time_today,
         }
     }
 
@@ -1137,9 +1445,15 @@ async fn main() {
 
     let (words, settings, stats) = gui::Program::load();
 
-    let mut program = gui::Program::new(words, settings, stats, today);
+    let mut pause_detector = PauseDetector::new(
+        stats
+            .by_day
+            .get(&today)
+            .map(|x| x.working_time)
+            .unwrap_or(0.),
+    );
 
-    let mut pause_detector = PauseDetector::new();
+    let mut program = gui::Program::new(words, settings, stats, today);
 
     let texture = Texture2D::from_rgba8(1, 1, &[192, 192, 192, 128]);
     let pause = Texture2D::from_file_with_format(include_bytes!("../pause.png"), None);
