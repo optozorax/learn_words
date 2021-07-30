@@ -421,6 +421,42 @@ mod gui {
     use super::*;
     use egui::*;
 
+    struct ClosableWindow<T: WindowTrait>(Option<T>);
+
+    impl<T: WindowTrait> Default for ClosableWindow<T> {
+        fn default() -> Self {
+            Self(None)
+        }
+    }
+
+    trait WindowTrait {
+        fn create_window(&self) -> Window<'static>;
+    }
+
+    impl<T: WindowTrait> ClosableWindow<T> {
+        fn new(t: T) -> Self {
+            Self(Some(t))
+        }
+
+        /// Возвращение true в f означает что самого себя надо закрыть. Возвращение true в ui означает что окно закрылось
+        fn ui(&mut self, ctx: &CtxRef, f: impl FnOnce(&mut T, &mut Ui) -> bool) -> bool {
+            if let Some(t) = &mut self.0 {
+                let mut opened = true;
+                let mut want_to_be_closed = false;
+
+                t.create_window()
+                    .open(&mut opened)
+                    .show(ctx, |ui| want_to_be_closed = f(t, ui));
+
+                if !opened || want_to_be_closed {
+                    self.0 = None;
+                    return true;
+                }
+            }
+            false
+        }
+    }
+
     pub struct Program {
         words: Words,
         settings: Settings,
@@ -429,9 +465,9 @@ mod gui {
         /// Известные, мусорные, выученные, добавленные слова, необходимо для фильтрации после добавления слова
         known_words: BTreeSet<String>,
         learn_window: LearnWordsWindow,
-        load_text_window: Option<LoadTextWindow>,
-        add_words_window: Option<AddWordsWindow>,
-        add_custom_words_window: Option<AddCustomWordsWindow>,
+        load_text_window: ClosableWindow<LoadTextWindow>,
+        add_words_window: ClosableWindow<AddWordsWindow>,
+        add_custom_words_window: ClosableWindow<AddCustomWordsWindow>,
     }
 
     impl Program {
@@ -446,9 +482,9 @@ mod gui {
 
                 known_words,
                 learn_window,
-                load_text_window: None,
-                add_words_window: None,
-                add_custom_words_window: None,
+                load_text_window: Default::default(),
+                add_words_window: Default::default(),
+                add_custom_words_window: Default::default(),
             }
         }
 
@@ -482,13 +518,13 @@ mod gui {
                 menu::bar(ui, |ui| {
                     menu::menu(ui, "Add words", |ui| {
                         if ui.button("From text").clicked() {
-                            self.load_text_window = Some(LoadTextWindow::new(false));
+                            self.load_text_window = ClosableWindow::new(LoadTextWindow::new(false));
                         }
                         if ui.button("From subtitles").clicked() {
-                            self.load_text_window = Some(LoadTextWindow::new(true));
+                            self.load_text_window = ClosableWindow::new(LoadTextWindow::new(true));
                         }
                         if ui.button("Manually").clicked() {
-                            self.add_custom_words_window = Some(Default::default());
+                            self.add_custom_words_window = ClosableWindow::new(Default::default());
                         }
                     });
                     if ui.button("Save").clicked() {
@@ -517,54 +553,59 @@ mod gui {
                 today,
                 &mut self.stats.by_day.entry(today).or_default(),
             );
-            if let Some(window) = &mut self.load_text_window {
-                use LoadTextAction::*;
-                match window.ui(ctx, &self.known_words) {
-                    Some(CloseSelf) => self.load_text_window = None,
-                    Some(CreateAddWordWindow(words)) => {
-                        self.load_text_window = None;
-                        self.add_words_window = Some(AddWordsWindow::new(words));
-                    }
-                    None => {}
+
+            let window = &mut self.load_text_window;
+            let known_words = &self.known_words;
+            let add_words_window = &mut self.add_words_window;
+            window.ui(ctx, |t, ui| {
+                if let Some(words) = t.ui(ui, known_words) {
+                    *add_words_window = ClosableWindow::new(AddWordsWindow::new(words));
+                    true
+                } else {
+                    false
                 }
+            });
+
+            let window = &mut self.add_words_window;
+            let settings = &self.settings;
+            let words = &mut self.words;
+            let stats = &mut self.stats;
+            let closed = window.ui(ctx, |t, ui| {
+                if let Some((word, to_add, close)) = t.ui(ui) {
+                    words.add_word(
+                        word,
+                        to_add,
+                        settings,
+                        today,
+                        stats.by_day.entry(today).or_default(),
+                    );
+                    close
+                } else {
+                    false
+                }
+            });
+            if closed {
+                self.learn_window.update(&self.words, today);
             }
-            if let Some(window) = &mut self.add_words_window {
-                use AddWordsAction::*;
-                match window.ui(ctx) {
-                    Some(CloseSelf) => {
-                        self.add_words_window = None;
-                        self.learn_window.update(&self.words, today);
-                    }
-                    Some(AddWord(word, to_add)) => {
-                        self.words.add_word(
-                            word,
-                            to_add,
-                            &self.settings,
-                            today,
-                            &mut self.stats.by_day.entry(today).or_default(),
-                        );
-                    }
-                    None => {}
+
+            let window = &mut self.add_custom_words_window;
+            let settings = &self.settings;
+            let words = &mut self.words;
+            let stats = &mut self.stats;
+            let closed = window.ui(ctx, |t, ui| {
+                if let Some((word, to_add)) = t.ui(ui) {
+                    words.add_word(
+                        word,
+                        to_add,
+                        settings,
+                        today,
+                        stats.by_day.entry(today).or_default(),
+                    );
                 }
-            }
-            if let Some(window) = &mut self.add_custom_words_window {
-                use AddWordsAction::*;
-                match window.ui(ctx) {
-                    Some(CloseSelf) => {
-                        self.add_custom_words_window = None;
-                        self.learn_window.update(&self.words, today);
-                    }
-                    Some(AddWord(word, to_add)) => {
-                        self.words.add_word(
-                            word,
-                            to_add,
-                            &self.settings,
-                            today,
-                            &mut self.stats.by_day.entry(today).or_default(),
-                        );
-                    }
-                    None => {}
-                }
+                false
+            });
+            if closed {
+                self.learn_window.update(&self.words, today);
             }
 
             egui::TopBottomPanel::bottom("bottom").show(ctx, |ui| {
@@ -585,9 +626,15 @@ mod gui {
         text: Result<String, String>,
     }
 
-    enum LoadTextAction {
-        CloseSelf,
-        CreateAddWordWindow(Vec<String>),
+    impl WindowTrait for LoadTextWindow {
+        fn create_window(&self) -> Window<'static> {
+            Window::new(if self.load_subtitles {
+                "Load words from subtitles"
+            } else {
+                "Load words from text"
+            })
+            .scroll(false)
+        }
     }
 
     impl LoadTextWindow {
@@ -599,76 +646,59 @@ mod gui {
             }
         }
 
-        fn ui(&mut self, ctx: &CtxRef, known_words: &BTreeSet<String>) -> Option<LoadTextAction> {
-            let mut opened = true;
-
+        fn ui(&mut self, ui: &mut Ui, known_words: &BTreeSet<String>) -> Option<Vec<String>> {
             let mut action = None;
+            ui.horizontal(|ui| {
+                if ui.button("Use this text").clicked() {
+                    let text = self.text.as_ref().unwrap_or_else(|x| x);
 
-            egui::Window::new(if self.load_subtitles {
-                "Load words from subtitles"
-            } else {
-                "Load words from text"
-            })
-            .open(&mut opened)
-            .scroll(false)
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    if ui.button("Use this text").clicked() {
-                        let text = self.text.as_ref().unwrap_or_else(|x| x);
-
-                        let words = if self.load_subtitles {
-                            match get_words_subtitles(&text) {
-                                Ok(words) => Some(words),
-                                Err(error) => {
-                                    self.subtitles_error = Some(format!("{:#?}", error));
-                                    None
-                                }
+                    let words = if self.load_subtitles {
+                        match get_words_subtitles(&text) {
+                            Ok(words) => Some(words),
+                            Err(error) => {
+                                self.subtitles_error = Some(format!("{:#?}", error));
+                                None
                             }
-                        } else {
-                            Some(get_words(&text))
-                        };
-                        if let Some(words) = words {
-                            let words = words
-                                .into_iter()
-                                .filter(|x| !known_words.contains(x))
-                                .collect();
-                            action = Some(LoadTextAction::CreateAddWordWindow(words));
                         }
-                    }
-                    if ui.button("Update clipboard").clicked() {
-                        self.text = read_clipboard().ok_or_else(String::new);
-                    }
-                });
-                match &mut self.text {
-                    Ok(text) => {
-                        if text.len() > 50 {
-                            ui.label(format!(
-                                "{}... {:.1} KB",
-                                text.chars().take(50).collect::<String>(),
-                                text.len() as f64 / 1024.0
-                            ));
-                        } else {
-                            ui.label(&*text);
-                        }
-                    }
-                    Err(text) => {
-                        ui.text_edit_multiline(text);
+                    } else {
+                        Some(get_words(&text))
+                    };
+                    if let Some(words) = words {
+                        let words = words
+                            .into_iter()
+                            .filter(|x| !known_words.contains(x))
+                            .collect();
+                        action = Some(words);
                     }
                 }
-                if let Some(error) = &self.subtitles_error {
-                    ui.separator();
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing.x = 0.;
-                        ui.add(Label::new("Error: ").text_color(Color32::RED).monospace());
-                        ui.monospace(error);
-                    });
+                if ui.button("Update clipboard").clicked() {
+                    self.text = read_clipboard().ok_or_else(String::new);
                 }
             });
-
-            if !opened {
-                action = Some(LoadTextAction::CloseSelf);
+            match &mut self.text {
+                Ok(text) => {
+                    if text.len() > 50 {
+                        ui.label(format!(
+                            "{}... {:.1} KB",
+                            text.chars().take(50).collect::<String>(),
+                            text.len() as f64 / 1024.0
+                        ));
+                    } else {
+                        ui.label(&*text);
+                    }
+                }
+                Err(text) => {
+                    ui.text_edit_multiline(text);
+                }
             }
-
+            if let Some(error) = &self.subtitles_error {
+                ui.separator();
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.;
+                    ui.add(Label::new("Error: ").text_color(Color32::RED).monospace());
+                    ui.monospace(error);
+                });
+            }
             action
         }
     }
@@ -678,9 +708,10 @@ mod gui {
         translations: String,
     }
 
-    enum AddWordsAction {
-        CloseSelf,
-        AddWord(String, WordsToAdd),
+    impl WindowTrait for AddWordsWindow {
+        fn create_window(&self) -> Window<'static> {
+            Window::new("Add words").scroll(false)
+        }
     }
 
     impl AddWordsWindow {
@@ -691,34 +722,17 @@ mod gui {
             }
         }
 
-        fn ui(&mut self, ctx: &CtxRef) -> Option<AddWordsAction> {
-            let mut opened = true;
-
+        fn ui(&mut self, ui: &mut Ui) -> Option<(String, WordsToAdd, bool)> {
             let mut action = None;
-
-            if !self.words.is_empty() {
-                egui::Window::new("Add words")
-                    .open(&mut opened)
-                    .scroll(false)
-                    .show(ctx, |ui| {
-                        ui.label(format!("Words remains: {}", self.words.len()));
-                        ui.separator();
-                        if let Some((word, to_add)) =
-                            word_to_add(ui, &mut self.words[0], &mut self.translations)
-                        {
-                            self.translations.clear();
-                            self.words.remove(0);
-                            action = Some(AddWordsAction::AddWord(word, to_add));
-                        }
-                    });
-            } else {
-                action = Some(AddWordsAction::CloseSelf);
+            ui.label(format!("Words remains: {}", self.words.len()));
+            ui.separator();
+            if let Some((word, to_add)) =
+                word_to_add(ui, &mut self.words[0], &mut self.translations)
+            {
+                self.translations.clear();
+                self.words.remove(0);
+                action = Some((word, to_add, self.words.is_empty()));
             }
-
-            if !opened {
-                action = Some(AddWordsAction::CloseSelf);
-            }
-
             action
         }
     }
@@ -729,30 +743,21 @@ mod gui {
         translations: String,
     }
 
+    impl WindowTrait for AddCustomWordsWindow {
+        fn create_window(&self) -> Window<'static> {
+            Window::new("Add words").scroll(false)
+        }
+    }
+
     impl AddCustomWordsWindow {
-        fn ui(&mut self, ctx: &CtxRef) -> Option<AddWordsAction> {
-            let mut opened = true;
-
+        fn ui(&mut self, ui: &mut Ui) -> Option<(String, WordsToAdd)> {
             let mut action = None;
-
-            egui::Window::new("Add words")
-                .open(&mut opened)
-                .scroll(false)
-                .show(ctx, |ui| {
-                    ui.separator();
-                    if let Some((word, to_add)) =
-                        word_to_add(ui, &mut self.word, &mut self.translations)
-                    {
-                        self.translations.clear();
-                        self.word.clear();
-                        action = Some(AddWordsAction::AddWord(word, to_add));
-                    }
-                });
-
-            if !opened {
-                action = Some(AddWordsAction::CloseSelf);
+            ui.separator();
+            if let Some((word, to_add)) = word_to_add(ui, &mut self.word, &mut self.translations) {
+                self.translations.clear();
+                self.word.clear();
+                action = Some((word, to_add));
             }
-
             action
         }
     }
