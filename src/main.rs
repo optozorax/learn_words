@@ -61,8 +61,8 @@ impl LearnType {
 /// Статистика написаний для слова, дня или вообще
 #[derive(Default, Serialize, Deserialize, Clone, Copy, Debug)]
 struct TypingStats {
-    right: i32,
-    wrong: i32,
+    right: u64,
+    wrong: u64,
 }
 
 /// Обозначает одну пару слов рус-англ или англ-рус в статистике
@@ -309,7 +309,7 @@ impl Words {
         unreachable!()
     }
 
-    fn calculate_word_statistics(&self) -> BTreeMap<WordType, usize> {
+    fn calculate_word_statistics(&self) -> BTreeMap<WordType, u64> {
         let mut result = BTreeMap::new();
         for i in self.0.values().flatten() {
             use WordStatus::*;
@@ -386,20 +386,23 @@ impl KeyboardLayout {
         let a: Vec<char> = lang1.chars().filter(|x| *x != '\n').collect();
         let b: Vec<char> = lang2.chars().filter(|x| *x != '\n').collect();
         if a.len() != b.len() {
-            return Err(format!("Lengths of symbols are not equal: {} ≠ {}", a.len(), b.len()));
+            return Err(format!(
+                "Lengths of symbols are not equal: {} ≠ {}",
+                a.len(),
+                b.len()
+            ));
         }
 
         let mut error_reason = (' ', ' ');
-        if a.iter()
-            .filter(|a| **a != ' ')
-            .any(|a| b.iter().any(|x| {
+        if a.iter().filter(|a| **a != ' ').any(|a| {
+            b.iter().any(|x| {
                 let result = *x == *a;
                 if result {
                     error_reason = (*x, *a);
                 }
                 result
-            }))
-        {
+            })
+        }) {
             return Err(format!("In first lang there is symbol '{}', which equals to symbol '{}' in the second lang.", error_reason.0, error_reason.1));
         }
 
@@ -468,8 +471,8 @@ pub enum WordType {
 #[derive(Default, Serialize, Deserialize, Clone, Debug)]
 pub struct DayStatistics {
     attempts: TypingStats,
-    new_unknown_words_count: usize,
-    word_count_by_level: BTreeMap<WordType, usize>,
+    new_unknown_words_count: u64,
+    word_count_by_level: BTreeMap<WordType, u64>,
     working_time: f64,
 }
 
@@ -532,17 +535,24 @@ mod gui {
 
         full_stats_window: ClosableWindow<FullStatsWindow>,
         percentage_graph_window: ClosableWindow<PercentageGraphWindow>,
+        github_activity_window: ClosableWindow<GithubActivityWindow>,
 
         import_window: ClosableWindow<ImportWindow>,
         settings_window: ClosableWindow<SettingsWindow>,
     }
 
     impl Program {
-        pub fn new(words: Words, settings: Settings, stats: Statistics, today: Day) -> Self {
+        pub fn new(
+            words: Words,
+            settings: Settings,
+            stats: Statistics,
+            today: Day,
+            working_time: f64,
+        ) -> Self {
             let learn_window = LearnWordsWindow::new(&words, today);
             let known_words = words.calculate_known_words();
 
-            Self {
+            let mut result = Self {
                 words,
                 settings,
                 stats,
@@ -555,10 +565,15 @@ mod gui {
 
                 full_stats_window: Default::default(),
                 percentage_graph_window: Default::default(),
+                github_activity_window: Default::default(),
 
                 import_window: Default::default(),
                 settings_window: Default::default(),
-            }
+            };
+
+            result.open_activity(today, working_time);
+
+            result
         }
 
         pub fn get_settings(&self) -> &Settings {
@@ -588,6 +603,12 @@ mod gui {
             let today = &mut self.stats.by_day.entry(today).or_default();
             today.working_time = working_time;
             today.word_count_by_level = self.words.calculate_word_statistics();
+        }
+
+        pub fn open_activity(&mut self, today: Day, working_time: f64) {
+            self.update_day_statistics(today, working_time);
+            self.github_activity_window =
+                ClosableWindow::new(GithubActivityWindow::new(&self.stats, today));
         }
 
         pub fn ui(&mut self, ctx: &CtxRef, today: Day, working_time: f64) {
@@ -623,6 +644,10 @@ mod gui {
                                 word_count_by_level: self.words.calculate_word_statistics(),
                             });
                         }
+                        if ui.button("GitHub-like").clicked() {
+                            self.open_activity(today, working_time);
+                        }
+                        ui.separator();
                         if ui.button("Attempts by day").clicked() {
                             self.update_day_statistics(today, working_time);
                             self.percentage_graph_window =
@@ -711,7 +736,8 @@ mod gui {
                         }
                     });
                     if ui.button("Settings").clicked() {
-                        self.settings_window = ClosableWindow::new(SettingsWindow::new(&self.settings));
+                        self.settings_window =
+                            ClosableWindow::new(SettingsWindow::new(&self.settings));
                     }
                     if ui.button("About").clicked() {}
                 });
@@ -814,30 +840,35 @@ mod gui {
                 false
             });
 
+            self.github_activity_window.ui(ctx, |t, ui| {
+                t.ui(ui);
+                false
+            });
+
             egui::TopBottomPanel::bottom("bottom").show(ctx, |ui| {
                 let today = &self.stats.by_day.entry(today).or_default();
                 ui.monospace(format!(
-                    "Working time: {} | Attempts: {:4} | New words: {:4}",
-                    if working_time > 3600. {
-                        format!(
-                            "{:2}:{:02}:{:02}",
-                            working_time as u32 / 3600,
-                            working_time as u32 % 3600 / 60,
-                            working_time as u32 % 60
-                        )
-                    } else if working_time > 60. {
-                        format!(
-                            "   {:02}:{:02}",
-                            working_time as u32 / 60,
-                            working_time as u32 % 60
-                        )
-                    } else {
-                        format!("      {:02}", working_time as u32)
-                    },
+                    "Working time: {:6} | Attempts: {:4} | New words: {:4}",
+                    print_time(working_time),
                     today.attempts.right + today.attempts.wrong,
                     today.new_unknown_words_count,
                 ));
             });
+        }
+    }
+
+    fn print_time(time: f64) -> String {
+        if time > 3600. {
+            format!(
+                "{}:{:02}:{:02}",
+                time as u32 / 3600,
+                time as u32 % 3600 / 60,
+                time as u32 % 60
+            )
+        } else if time > 60. {
+            format!("{:02}:{:02}", time as u32 / 60, time as u32 % 60)
+        } else {
+            format!("{:02}", time as u32)
         }
     }
 
@@ -1042,7 +1073,7 @@ mod gui {
                             settings.use_keyboard_layout = true;
                             settings.keyboard_layout = ok;
                             self.info = Some(Ok("Used!".to_string()));
-                        },
+                        }
                         Err(err) => {
                             self.info = Some(Err(err));
                         }
@@ -1052,7 +1083,7 @@ mod gui {
                     match info {
                         Ok(ok) => {
                             ui.label(ok);
-                        },
+                        }
                         Err(err) => {
                             ui.horizontal_wrapped(|ui| {
                                 ui.spacing_mut().item_spacing.x = 0.;
@@ -1136,7 +1167,7 @@ mod gui {
     #[derive(Default)]
     struct FullStatsWindow {
         attempts: TypingStats,
-        word_count_by_level: BTreeMap<WordType, usize>,
+        word_count_by_level: BTreeMap<WordType, u64>,
     }
 
     impl WindowTrait for FullStatsWindow {
@@ -1216,6 +1247,339 @@ mod gui {
                 plot = plot.line(line.name(name));
             }
             ui.add(plot);
+        }
+    }
+
+    struct GithubDayData {
+        attempts: u64,
+        time: f64,
+        new_unknown_words_count: u64,
+    }
+
+    struct GithubActivityWindow {
+        max_day: Day,
+        min_day: Day,
+
+        data_by_day: BTreeMap<Day, GithubDayData>,
+        max_value: GithubDayData,
+        min_value: GithubDayData,
+
+        show: u8,
+
+        show_day: Day,
+        drag_delta: f32,
+    }
+
+    impl WindowTrait for GithubActivityWindow {
+        fn create_window(&self) -> Window<'static> {
+            Window::new("Activity").scroll(false).collapsible(false)
+        }
+    }
+
+    fn date_from_day(day: Day) -> chrono::Date<chrono::Utc> {
+        use chrono::TimeZone;
+        chrono::Utc
+            .timestamp(day.0 as i64 * 24 * 60 * 60 + 3600, 0)
+            .date()
+    }
+
+    impl GithubActivityWindow {
+        fn new(stats: &Statistics, today: Day) -> Self {
+            let data_by_day: BTreeMap<Day, GithubDayData> = stats
+                .by_day
+                .iter()
+                .map(|(d, x)| {
+                    (
+                        *d,
+                        GithubDayData {
+                            attempts: x.attempts.right + x.attempts.wrong,
+                            time: x.working_time,
+                            new_unknown_words_count: x.new_unknown_words_count,
+                        },
+                    )
+                })
+                .collect();
+            let min_value = GithubDayData {
+                attempts: data_by_day.values().map(|x| x.attempts).min().unwrap(),
+                time: data_by_day
+                    .values()
+                    .map(|x| x.time)
+                    .min_by(|x, y| x.partial_cmp(y).unwrap())
+                    .unwrap(),
+                new_unknown_words_count: data_by_day
+                    .values()
+                    .map(|x| x.new_unknown_words_count)
+                    .min()
+                    .unwrap(),
+            };
+            let max_value = GithubDayData {
+                attempts: data_by_day.values().map(|x| x.attempts).max().unwrap(),
+                time: data_by_day
+                    .values()
+                    .map(|x| x.time)
+                    .max_by(|x, y| x.partial_cmp(y).unwrap())
+                    .unwrap(),
+                new_unknown_words_count: data_by_day
+                    .values()
+                    .map(|x| x.new_unknown_words_count)
+                    .max()
+                    .unwrap(),
+            };
+            Self {
+                min_day: *data_by_day.keys().next().unwrap(),
+                max_day: today,
+
+                data_by_day,
+                max_value,
+                min_value,
+
+                show: 0,
+
+                show_day: today,
+                drag_delta: 0.,
+            }
+        }
+
+        fn get_normalized_value(&self, day: Day) -> Option<f64> {
+            fn normalize(min: f64, max: f64, v: f64) -> f64 {
+                (v - min) / (max - min)
+            }
+
+            match self.show {
+                0 => self.data_by_day.get(&day).map(|x| {
+                    normalize(
+                        self.min_value.attempts as f64,
+                        self.max_value.attempts as f64,
+                        x.attempts as f64,
+                    )
+                }),
+                1 => self
+                    .data_by_day
+                    .get(&day)
+                    .map(|x| normalize(self.min_value.time, self.max_value.time, x.time)),
+                _ => self.data_by_day.get(&day).map(|x| {
+                    normalize(
+                        self.min_value.new_unknown_words_count as f64,
+                        self.max_value.new_unknown_words_count as f64,
+                        x.new_unknown_words_count as f64,
+                    )
+                }),
+            }
+        }
+
+        fn get_value_text(&self, day: Day) -> Option<String> {
+            self.data_by_day.get(&day).map(|x| {
+                format!(
+                    "Attempts: {}\nTime: {}\nNew words: {}",
+                    x.attempts,
+                    print_time(x.time),
+                    x.new_unknown_words_count
+                )
+            })
+        }
+
+        fn ui(&mut self, ui: &mut Ui) {
+            ui.horizontal(|ui| {
+                ui.label("Show data about: ");
+                ui.selectable_value(&mut self.show, 0, "Attempts");
+                ui.selectable_value(&mut self.show, 1, "Working time");
+                ui.selectable_value(&mut self.show, 2, "New words");
+            });
+            ui.separator();
+
+            let size = 8.;
+            let margin = 1.5;
+            let weeks = 53;
+            let days = 7;
+
+            let month_size = ui.fonts()[TextStyle::Body].row_height();
+            let weekday_size = 30.;
+
+            let desired_size = egui::vec2(
+                2. * margin + weeks as f32 * (size + margin) + weekday_size,
+                2. * margin + days as f32 * (size + margin) + month_size * 2.,
+            );
+            let (rect, response) = ui.allocate_exact_size(desired_size, Sense::drag());
+
+            self.drag_delta += response.drag_delta().x;
+            let offset_weeks = (self.drag_delta / (size + margin)) as i64;
+            let show_day = Day((self.show_day.0 as i64 - offset_weeks * 7) as u64);
+
+            use chrono::Datelike;
+            let today_date = date_from_day(show_day);
+            let today_week = today_date.weekday().number_from_monday() - 1;
+            let today_pos = 52 * 7 + today_week;
+
+            let min = rect.min + egui::vec2(margin + weekday_size, margin + month_size);
+            let size2 = egui::vec2(size, size);
+            let margin2 = egui::vec2(margin, margin) / 2.;
+            let stroke_hovered = Stroke::new(1., Color32::WHITE);
+            let stroke_month = Stroke::new(0.5, Color32::WHITE);
+            let stroke_year = Stroke::new(1., Color32::RED);
+            let left_1 = egui::vec2(-margin / 2., -margin / 2.);
+            let right_1 = egui::vec2(size + margin / 2., -margin / 2.);
+            let right_2 = egui::vec2(size + margin / 2., -margin / 2. - month_size);
+            let down_1 = egui::vec2(-margin / 2., size + margin / 2.);
+            let end_line = egui::vec2(size + margin / 2., size + margin / 2.);
+            let end_line2 = egui::vec2(size + margin / 2., size + margin / 2. + month_size);
+            let mut month_pos = BTreeMap::new();
+            let mut year_pos = BTreeMap::new();
+            for i in 0..weeks {
+                for j in 0..days {
+                    let pos = i * 7 + j;
+                    let day = Day(show_day.0 - today_pos as u64 + pos);
+                    let date = date_from_day(day);
+
+                    if j + 1 == days {
+                        month_pos
+                            .entry((date.month(), date.year()))
+                            .or_insert_with(Vec::new)
+                            .push(i);
+                    }
+                    if j == 0 {
+                        year_pos.entry(date.year()).or_insert_with(Vec::new).push(i);
+                    }
+
+                    let pos =
+                        min + egui::vec2(i as f32 * (size + margin), j as f32 * (size + margin));
+
+                    if i + 1 != weeks {
+                        let pos_right = (i + 1) * 7 + j;
+                        let day_right = Day(show_day.0 - today_pos as u64 + pos_right);
+                        let date_right = date_from_day(day_right);
+
+                        if date_right.year() != date.year() {
+                            if j == 0 {
+                                ui.painter()
+                                    .line_segment([pos + right_2, pos + end_line2], stroke_year);
+                            } else if j + 1 == days {
+                                ui.painter()
+                                    .line_segment([pos + right_1, pos + end_line2], stroke_year);
+                            } else {
+                                ui.painter()
+                                    .line_segment([pos + right_1, pos + end_line], stroke_year);
+                            }
+                        } else if date_right.month() != date.month() {
+                            if j + 1 == days {
+                                ui.painter()
+                                    .line_segment([pos + right_1, pos + end_line2], stroke_month);
+                            } else {
+                                ui.painter()
+                                    .line_segment([pos + right_1, pos + end_line], stroke_month);
+                            }
+                        }
+                    }
+
+                    if j == 0 {
+                        ui.painter()
+                            .line_segment([pos + left_1, pos + right_1], stroke_month);
+                    } else if j + 1 == days {
+                        ui.painter()
+                            .line_segment([pos + down_1, pos + end_line], stroke_month);
+                    }
+
+                    if j + 1 != days {
+                        let pos_down = i * 7 + (j + 1);
+                        let day_down = Day(show_day.0 - today_pos as u64 + pos_down);
+                        let date_down = date_from_day(day_down);
+
+                        if date_down.year() != date.year() {
+                            ui.painter()
+                                .line_segment([pos + down_1, pos + end_line], stroke_year);
+                        } else if date_down.month() != date.month() {
+                            ui.painter()
+                                .line_segment([pos + down_1, pos + end_line], stroke_month);
+                        }
+                    }
+
+                    let color = if day.0 < self.min_day.0 || day.0 > self.max_day.0 {
+                        ui.visuals().faint_bg_color
+                    } else if let Some(value) = self.get_normalized_value(day) {
+                        Color32::from(lerp(
+                            Rgba::from(ui.visuals().faint_bg_color)..=Rgba::from(Color32::GREEN),
+                            (((value as f32) + 0.2) / 1.2).powi(2),
+                        ))
+                    } else {
+                        ui.visuals().faint_bg_color
+                    };
+
+                    let mut rect = egui::Rect::from_min_max(pos, pos + size2);
+
+                    ui.painter().rect_filled(rect, 0., color);
+
+                    if let Some(pos) = response.hover_pos() {
+                        rect.min -= margin2;
+                        rect.max += margin2;
+                        if rect.contains(pos) && !response.dragged() {
+                            let data = self.get_value_text(day);
+                            let text = format!("{}-{}-{}", date.year(), date.month(), date.day())
+                                + if data.is_some() { "\n" } else { "" }
+                                + &data.unwrap_or_else(String::new);
+                            egui::show_tooltip_text(ui.ctx(), egui::Id::new("date tooltip"), text);
+                            ui.painter()
+                                .rect(rect, 0., Color32::TRANSPARENT, stroke_hovered);
+                        }
+                    }
+                }
+            }
+            for ((month, _), pos) in &month_pos {
+                if pos.len() < 3 {
+                    continue;
+                }
+                let pos = pos.iter().sum::<u64>() as f32 / pos.len() as f32;
+                let pos = min + egui::vec2(pos * (size + margin), 7. * (size + margin));
+                let month = match month {
+                    1 => "Jan",
+                    2 => "Feb",
+                    3 => "Mar",
+                    4 => "Apr",
+                    5 => "May",
+                    6 => "Jun",
+                    7 => "Jul",
+                    8 => "Aug",
+                    9 => "Sep",
+                    10 => "Oct",
+                    11 => "Nov",
+                    12 => "Dec",
+                    _ => unreachable!(),
+                };
+                ui.painter().text(
+                    pos,
+                    Align2::CENTER_TOP,
+                    month,
+                    TextStyle::Body,
+                    ui.visuals().text_color(),
+                );
+            }
+            for (year, pos) in &year_pos {
+                if pos.len() < 3 {
+                    continue;
+                }
+                let pos = pos.iter().sum::<u64>() as f32 / pos.len() as f32;
+                let pos = min + egui::vec2(pos * (size + margin), -month_size - margin);
+                let year = year.to_string();
+                ui.painter().text(
+                    pos,
+                    Align2::CENTER_TOP,
+                    year,
+                    TextStyle::Body,
+                    ui.visuals().text_color(),
+                );
+            }
+            ui.painter().text(
+                min + egui::vec2(-weekday_size, size / 2.),
+                Align2::LEFT_CENTER,
+                "Mon",
+                TextStyle::Body,
+                ui.visuals().text_color(),
+            );
+            ui.painter().text(
+                min + egui::vec2(-weekday_size, size * 7. + size / 2.),
+                Align2::LEFT_CENTER,
+                "Sun",
+                TextStyle::Body,
+                ui.visuals().text_color(),
+            );
         }
     }
 
@@ -1340,7 +1704,10 @@ mod gui {
                                 *gain_focus = false;
                             }
                         }
-                        for (i, correct) in words_to_guess.iter_mut().zip(correct_answer.words_to_guess.iter()) {
+                        for (i, correct) in words_to_guess
+                            .iter_mut()
+                            .zip(correct_answer.words_to_guess.iter())
+                        {
                             let response = ui.add(egui::TextEdit::singleline(i));
                             if settings.use_keyboard_layout {
                                 settings.keyboard_layout.change(correct, i);
@@ -1534,14 +1901,6 @@ mod gui {
     }
 }
 
-fn window_conf() -> Conf {
-    Conf {
-        window_title: "Learn Words".to_owned(),
-        high_dpi: true,
-        ..Default::default()
-    }
-}
-
 struct PauseDetector {
     last_mouse_position: (f32, f32),
     pausing: bool,
@@ -1595,6 +1954,16 @@ impl PauseDetector {
     }
 }
 
+fn window_conf() -> Conf {
+    Conf {
+        window_title: "Learn Words".to_owned(),
+        high_dpi: true,
+        window_width: 1024,
+        window_height: 768,
+        ..Default::default()
+    }
+}
+
 #[macroquad::main(window_conf)]
 async fn main() {
     /// Приватная функция
@@ -1623,7 +1992,13 @@ async fn main() {
             .unwrap_or(0.),
     );
 
-    let mut program = gui::Program::new(words, settings, stats, today);
+    let mut program = gui::Program::new(
+        words,
+        settings,
+        stats,
+        today,
+        pause_detector.get_working_time(),
+    );
 
     let texture = Texture2D::from_rgba8(1, 1, &[192, 192, 192, 128]);
     let pause = Texture2D::from_file_with_format(include_bytes!("../pause.png"), None);
