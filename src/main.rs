@@ -371,6 +371,65 @@ fn get_words(text: &str) -> Vec<String> {
 pub struct Settings {
     type_count: Vec<LearnType>,
     time_to_pause: f64,
+    use_keyboard_layout: bool,
+    keyboard_layout: KeyboardLayout,
+}
+
+#[derive(Default, Serialize, Deserialize, Clone, Debug)]
+struct KeyboardLayout {
+    lang1: BTreeMap<char, char>,
+    lang2: BTreeMap<char, char>,
+}
+
+impl KeyboardLayout {
+    fn new(lang1: &str, lang2: &str) -> Result<KeyboardLayout, String> {
+        let a: Vec<char> = lang1.chars().filter(|x| *x != '\n').collect();
+        let b: Vec<char> = lang2.chars().filter(|x| *x != '\n').collect();
+        if a.len() != b.len() {
+            return Err(format!("Lengths of symbols are not equal: {} ≠ {}", a.len(), b.len()));
+        }
+
+        let mut error_reason = (' ', ' ');
+        if a.iter()
+            .filter(|a| **a != ' ')
+            .any(|a| b.iter().any(|x| {
+                let result = *x == *a;
+                if result {
+                    error_reason = (*x, *a);
+                }
+                result
+            }))
+        {
+            return Err(format!("In first lang there is symbol '{}', which equals to symbol '{}' in the second lang.", error_reason.0, error_reason.1));
+        }
+
+        let mut result = Self {
+            lang1: Default::default(),
+            lang2: Default::default(),
+        };
+
+        for (a, b) in a.iter().zip(b.iter()) {
+            result.lang1.insert(*a, *b);
+            result.lang2.insert(*b, *a);
+        }
+
+        dbg!(&result);
+
+        Ok(result)
+    }
+
+    fn change(&self, should_be: &str, to_change: &mut String) {
+        let is_first_lang = self.lang2.contains_key(&should_be.chars().next().unwrap());
+        let lang = if is_first_lang {
+            &self.lang1
+        } else {
+            &self.lang2
+        };
+        *to_change = to_change
+            .chars()
+            .map(|x| if let Some(c) = lang.get(&x) { *c } else { x })
+            .collect();
+    }
 }
 
 impl Default for Settings {
@@ -384,6 +443,8 @@ impl Default for Settings {
                 LearnType::guess(20, 5),
             ],
             time_to_pause: 15.,
+            use_keyboard_layout: false,
+            keyboard_layout: Default::default(),
         }
     }
 }
@@ -473,6 +534,7 @@ mod gui {
         percentage_graph_window: ClosableWindow<PercentageGraphWindow>,
 
         import_window: ClosableWindow<ImportWindow>,
+        settings_window: ClosableWindow<SettingsWindow>,
     }
 
     impl Program {
@@ -495,6 +557,7 @@ mod gui {
                 percentage_graph_window: Default::default(),
 
                 import_window: Default::default(),
+                settings_window: Default::default(),
             }
         }
 
@@ -647,6 +710,9 @@ mod gui {
                                 });
                         }
                     });
+                    if ui.button("Settings").clicked() {
+                        self.settings_window = ClosableWindow::new(SettingsWindow::new(&self.settings));
+                    }
                     if ui.button("About").clicked() {}
                 });
             });
@@ -656,6 +722,7 @@ mod gui {
                 &mut self.words,
                 today,
                 &mut self.stats.by_day.entry(today).or_default(),
+                &self.settings,
             );
 
             let window = &mut self.load_text_window;
@@ -687,6 +754,13 @@ mod gui {
             if closed {
                 self.learn_window.update(&self.words, today);
             }
+
+            let window = &mut self.settings_window;
+            let settings = &mut self.settings;
+            window.ui(ctx, |t, ui| {
+                t.ui(ui, settings);
+                false
+            });
 
             let window = &mut self.add_words_window;
             let settings = &self.settings;
@@ -902,6 +976,95 @@ mod gui {
                 });
             }
             action
+        }
+    }
+
+    struct SettingsWindow {
+        lang1: String,
+        lang2: String,
+        want_to_use_keyboard_layout: bool,
+        info: Option<Result<String, String>>,
+    }
+
+    impl WindowTrait for SettingsWindow {
+        fn create_window(&self) -> Window<'static> {
+            Window::new("Settings")
+                .scroll(false)
+                .fixed_size((300., 100.))
+                .collapsible(false)
+        }
+    }
+
+    impl SettingsWindow {
+        fn new(settings: &Settings) -> Self {
+            let mut result = Self {
+                lang1: String::new(),
+                lang2: String::new(),
+                want_to_use_keyboard_layout: false,
+                info: None,
+            };
+            if settings.use_keyboard_layout {
+                result.lang1 = settings.keyboard_layout.lang1.keys().copied().collect();
+                result.lang2 = settings.keyboard_layout.lang1.values().copied().collect();
+            }
+            result
+        }
+
+        fn ui(&mut self, ui: &mut Ui, settings: &mut Settings) {
+            ui.horizontal(|ui| {
+                ui.label("Inaction time for pause: ");
+                ui.add(
+                    egui::DragValue::new(&mut settings.time_to_pause)
+                        .speed(0.1)
+                        .clamp_range(0.0..=100.0)
+                        .min_decimals(0)
+                        .max_decimals(2),
+                );
+            });
+
+            if !self.want_to_use_keyboard_layout && settings.use_keyboard_layout {
+                self.want_to_use_keyboard_layout = true;
+            }
+            ui.checkbox(
+                &mut self.want_to_use_keyboard_layout,
+                "Use automatical change of keyboard layout",
+            );
+            if self.want_to_use_keyboard_layout {
+                ui.separator();
+                ui.label("Type all letters on your keyboard in first field, and then in the same order symbols in the second field. Newline is ignored. If you can't type some symbol, you can use space. Count of symbols except newline must be the same of both fields.");
+                ui.label("First language:");
+                ui.text_edit_multiline(&mut self.lang1);
+                ui.label("Second language:");
+                ui.text_edit_multiline(&mut self.lang2);
+                if ui.button("Use this keyboard layout").clicked() {
+                    match KeyboardLayout::new(&self.lang1, &self.lang2) {
+                        Ok(ok) => {
+                            settings.use_keyboard_layout = true;
+                            settings.keyboard_layout = ok;
+                            self.info = Some(Ok("Used!".to_string()));
+                        },
+                        Err(err) => {
+                            self.info = Some(Err(err));
+                        }
+                    }
+                }
+                if let Some(info) = &self.info {
+                    match info {
+                        Ok(ok) => {
+                            ui.label(ok);
+                        },
+                        Err(err) => {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing.x = 0.;
+                                ui.add(Label::new("Error: ").text_color(Color32::RED).monospace());
+                                ui.monospace(err);
+                            });
+                        }
+                    }
+                }
+            } else {
+                settings.use_keyboard_layout = false;
+            }
         }
     }
 
@@ -1137,6 +1300,7 @@ mod gui {
             words: &mut Words,
             today: Day,
             day_stats: &mut DayStatistics,
+            settings: &Settings,
         ) {
             egui::Window::new("Learn words")
                 .fixed_size((300., 100.))
@@ -1167,14 +1331,20 @@ mod gui {
                             .zip(words_to_type.iter_mut())
                         {
                             let response = ui.add(egui::TextEdit::singleline(i).hint_text(hint));
+                            if settings.use_keyboard_layout {
+                                settings.keyboard_layout.change(hint, i);
+                            }
                             if !focus_gained && *gain_focus {
                                 response.request_focus();
                                 focus_gained = true;
                                 *gain_focus = false;
                             }
                         }
-                        for i in &mut *words_to_guess {
+                        for (i, correct) in words_to_guess.iter_mut().zip(correct_answer.words_to_guess.iter()) {
                             let response = ui.add(egui::TextEdit::singleline(i));
+                            if settings.use_keyboard_layout {
+                                settings.keyboard_layout.change(correct, i);
+                            }
                             if !focus_gained && *gain_focus {
                                 response.request_focus();
                                 focus_gained = true;
