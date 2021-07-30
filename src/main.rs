@@ -84,6 +84,9 @@ enum WordStatus {
         /// Количество изучений слова, при поиске того что надо печатать, проходим по всему массиву
         learns: Vec<LearnType>,
 
+        /// Количество learns, которое уже преодолено
+        current_level: usize,
+
         /// Статистика
         stats: TypingStats,
     },
@@ -107,6 +110,7 @@ impl WordStatus {
                 learns,
                 last_learn,
                 translation,
+                current_level,
             } => {
                 if correct {
                     stats.right += 1;
@@ -129,6 +133,7 @@ impl WordStatus {
                                     Some(learn)
                                 } else {
                                     *last_learn = today;
+                                    *current_level += 1;
                                     None
                                 }
                             } else {
@@ -176,12 +181,6 @@ impl WordStatus {
 #[derive(Default, Serialize, Deserialize, Clone, Debug)]
 pub struct Words(BTreeMap<String, Vec<WordStatus>>);
 
-impl Drop for Words {
-    fn drop(&mut self) {
-        self.save();
-    }
-}
-
 enum WordsToAdd {
     KnowPreviously,
     TrashWord,
@@ -195,10 +194,6 @@ struct WordsToLearn {
 }
 
 impl Words {
-    fn save(&self) {
-        std::fs::write("learn_words.data", ron::to_string(self).unwrap()).unwrap();
-    }
-
     fn calculate_known_words(&self) -> BTreeSet<String> {
         self.0.iter().map(|(word, _)| word.clone()).collect()
     }
@@ -215,6 +210,7 @@ impl Words {
                         translation: translation.clone(),
                         last_learn: today,
                         learns: settings.type_count.clone(),
+                        current_level: 0,
                         stats: Default::default(),
                     });
                 }
@@ -226,6 +222,7 @@ impl Words {
                             translation: word.clone(),
                             last_learn: today,
                             learns: settings.type_count.clone(),
+                            current_level: 0,
                             stats: Default::default(),
                         });
                 }
@@ -326,8 +323,10 @@ fn get_words(text: &str) -> Vec<String> {
         .collect::<Vec<_>>()
 }
 
-struct Settings {
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Settings {
     type_count: Vec<LearnType>,
+    time_to_pause: f64,
 }
 
 impl Default for Settings {
@@ -340,6 +339,7 @@ impl Default for Settings {
                 LearnType::guess(7, 5),
                 LearnType::guess(20, 5),
             ],
+            time_to_pause: 15.,
         }
     }
 }
@@ -368,7 +368,7 @@ mod gui {
     }
 
     impl Program {
-        pub fn new(words: Words, today: Day) -> Self {
+        pub fn new(words: Words, settings: Settings, today: Day) -> Self {
             let learn_window = LearnWordsWindow::new(&words, today);
             let known_words = words.calculate_known_words();
 
@@ -379,8 +379,26 @@ mod gui {
                 load_text_window: None,
                 add_words_window: None,
                 add_custom_words_window: None,
-                settings: Settings::default(),
+                settings,
             }
+        }
+
+        pub fn get_settings(&self) -> &Settings {
+            &self.settings
+        }
+
+        pub fn save(&self) {
+            std::fs::write(
+                "learn_words.data",
+                ron::to_string(&(&self.data, &self.settings)).unwrap(),
+            )
+            .unwrap();
+        }
+
+        pub fn load() -> (Words, Settings) {
+            std::fs::read_to_string("learn_words.data")
+                .map(|x| ron::from_str::<(Words, Settings)>(&x).unwrap())
+                .unwrap_or_default()
         }
 
         pub fn ui(&mut self, ctx: &CtxRef, today: Day) {
@@ -398,7 +416,7 @@ mod gui {
                         }
                     });
                     if ui.button("Save").clicked() {
-                        self.data.save();
+                        self.save();
                     }
                     if ui.button("Debug").clicked() {
                         println!("------------------------------");
@@ -919,6 +937,59 @@ fn window_conf() -> Conf {
     }
 }
 
+struct PauseDetector {
+    last_mouse_position: (f32, f32),
+    pausing: bool,
+    time: f64,
+
+    last_time: f64,
+    time_without_pauses: f64,
+}
+
+impl PauseDetector {
+    fn new() -> Self {
+        Self {
+            last_mouse_position: mouse_position(),
+            pausing: false,
+            time: get_time(),
+            last_time: get_time(),
+            time_without_pauses: 0.,
+        }
+    }
+
+    fn is_paused(&mut self, settings: &Settings) -> bool {
+        let current_mouse_position = mouse_position();
+        let mouse_offset = (self.last_mouse_position.0 - current_mouse_position.0).abs()
+            + (self.last_mouse_position.1 - current_mouse_position.1).abs();
+        let mouse_not_moving = mouse_offset < 0.01;
+        let keyboard_not_typing = get_last_key_pressed().is_none();
+
+        self.last_mouse_position = current_mouse_position;
+        let now = get_time();
+        if !(self.pausing && now - self.time > settings.time_to_pause) {
+            self.time_without_pauses += now - self.last_time;
+        }
+        self.last_time = now;
+
+        if mouse_not_moving && keyboard_not_typing {
+            if self.pausing {
+                now - self.time > settings.time_to_pause
+            } else {
+                self.pausing = true;
+                self.time = now;
+                false
+            }
+        } else {
+            self.pausing = false;
+            false
+        }
+    }
+
+    fn get_working_time(&self) -> f64 {
+        self.time_without_pauses
+    }
+}
+
 #[macroquad::main(window_conf)]
 async fn main() {
     /// Приватная функция
@@ -937,19 +1008,59 @@ async fn main() {
     #[cfg(not(target_arch = "wasm32"))]
     color_backtrace::install();
 
-    let words: Words = std::fs::read_to_string("learn_words.data")
-        .map(|x| ron::from_str::<Words>(&x).unwrap())
-        .unwrap_or_default();
+    let (words, settings) = gui::Program::load();
 
-    let mut program = gui::Program::new(words, today);
+    let mut program = gui::Program::new(words, settings, today);
+
+    let mut pause_detector = PauseDetector::new();
+
+    let texture = Texture2D::from_rgba8(1, 1, &[192, 192, 192, 128]);
+    let pause = Texture2D::from_file_with_format(include_bytes!("../pause.png"), None);
 
     loop {
         clear_background(BLACK);
 
         egui_macroquad::ui(|ctx| {
             program.ui(ctx, today);
+            egui::TopBottomPanel::bottom("data").show(ctx, |ui| {
+                ui.label(format!(
+                    "Working time: {:.1}",
+                    pause_detector.get_working_time()
+                ));
+            });
         });
         egui_macroquad::draw();
+
+        if pause_detector.is_paused(program.get_settings()) {
+            draw_texture_ex(
+                texture,
+                0.,
+                0.,
+                WHITE,
+                DrawTextureParams {
+                    dest_size: Some(Vec2::new(screen_width(), screen_height())),
+                    source: None,
+                    rotation: 0.,
+                    flip_x: false,
+                    flip_y: false,
+                    pivot: None,
+                },
+            );
+            draw_texture_ex(
+                pause,
+                screen_width() / 2. - 100.,
+                screen_height() / 2. - 100.,
+                WHITE,
+                DrawTextureParams {
+                    dest_size: Some(Vec2::new(200.0, 200.0)),
+                    source: None,
+                    rotation: 0.,
+                    flip_x: false,
+                    flip_y: false,
+                    pivot: None,
+                },
+            );
+        }
 
         next_frame().await;
     }
