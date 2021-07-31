@@ -269,9 +269,13 @@ impl Words {
                             words_to_guess.push(translation.clone());
                         }
                         break;
-                    } else {
-                        known_words.push(translation.clone());
                     }
+                }
+                if learns
+                    .iter()
+                    .all(|x| !x.can_learn_today(*last_learn, today))
+                {
+                    known_words.push(translation.clone());
                 }
             } else if let WordStatus::Learned { translation, .. } = i {
                 known_words.push(translation.clone());
@@ -453,7 +457,8 @@ impl Default for Settings {
 }
 
 fn read_clipboard() -> Option<String> {
-    miniquad::clipboard::get(unsafe { get_internal_gl().quad_context })
+    let result = miniquad::clipboard::get(unsafe { get_internal_gl().quad_context });
+    result
 }
 
 fn write_clipboard(s: &str) {
@@ -539,6 +544,7 @@ mod gui {
 
         import_window: ClosableWindow<ImportWindow>,
         settings_window: ClosableWindow<SettingsWindow>,
+        about_window: ClosableWindow<AboutWindow>,
     }
 
     impl Program {
@@ -569,6 +575,7 @@ mod gui {
 
                 import_window: Default::default(),
                 settings_window: Default::default(),
+                about_window: Default::default(),
             };
 
             result.open_activity(today, working_time);
@@ -586,11 +593,17 @@ mod gui {
         }
 
         pub fn save(&mut self, today: Day, working_time: f64) {
-            std::fs::write("learn_words.data", self.save_to_string(today, working_time)).unwrap();
+            quad_storage::STORAGE.lock().unwrap().set(
+                "learn_words_data",
+                &self.save_to_string(today, working_time),
+            );
         }
 
         pub fn load() -> (Words, Settings, Statistics) {
-            std::fs::read_to_string("learn_words.data")
+            quad_storage::STORAGE
+                .lock()
+                .unwrap()
+                .get("learn_words_data")
                 .map(|x| Self::load_from_string(&x).unwrap())
                 .unwrap_or_default()
         }
@@ -611,19 +624,15 @@ mod gui {
                 ClosableWindow::new(GithubActivityWindow::new(&self.stats, today));
         }
 
-        pub fn ui(&mut self, ctx: &CtxRef, today: Day, working_time: f64) {
+        pub fn ui(&mut self, ctx: &CtxRef, today: Day, working_time: &mut f64) {
             TopBottomPanel::top("top").show(ctx, |ui| {
                 menu::bar(ui, |ui| {
                     menu::menu(ui, "Data", |ui| {
                         if ui.button("Export to clipboard").clicked() {
-                            write_clipboard(&self.save_to_string(today, working_time));
+                            write_clipboard(&self.save_to_string(today, *working_time));
                         }
                         if ui.button("Import").clicked() {
                             self.import_window = ClosableWindow::new(ImportWindow::new());
-                        }
-                        ui.separator();
-                        if ui.button("Save").clicked() {
-                            self.save(today, working_time);
                         }
                     });
                     menu::menu(ui, "Add words", |ui| {
@@ -645,11 +654,11 @@ mod gui {
                             });
                         }
                         if ui.button("GitHub-like").clicked() {
-                            self.open_activity(today, working_time);
+                            self.open_activity(today, *working_time);
                         }
                         ui.separator();
                         if ui.button("Attempts by day").clicked() {
-                            self.update_day_statistics(today, working_time);
+                            self.update_day_statistics(today, *working_time);
                             self.percentage_graph_window =
                                 ClosableWindow::new(PercentageGraphWindow {
                                     name: "Attempts by day",
@@ -675,7 +684,7 @@ mod gui {
                                 });
                         }
                         if ui.button("Time by day").clicked() {
-                            self.update_day_statistics(today, working_time);
+                            self.update_day_statistics(today, *working_time);
                             self.percentage_graph_window =
                                 ClosableWindow::new(PercentageGraphWindow {
                                     name: "Time by day",
@@ -690,7 +699,7 @@ mod gui {
                                 });
                         }
                         if ui.button("Words by day").clicked() {
-                            self.update_day_statistics(today, working_time);
+                            self.update_day_statistics(today, *working_time);
                             let available_types: BTreeSet<WordType> = self
                                 .stats
                                 .by_day
@@ -739,17 +748,24 @@ mod gui {
                         self.settings_window =
                             ClosableWindow::new(SettingsWindow::new(&self.settings));
                     }
-                    if ui.button("About").clicked() {}
+                    if ui.button("About").clicked() {
+                        self.about_window = ClosableWindow::new(AboutWindow);
+                    }
                 });
             });
 
+            let mut save = false;
             self.learn_window.ui(
                 ctx,
                 &mut self.words,
                 today,
                 &mut self.stats.by_day.entry(today).or_default(),
                 &self.settings,
+                &mut save,
             );
+            if save {
+                self.save(today, *working_time);
+            }
 
             let window = &mut self.load_text_window;
             let known_words = &self.known_words;
@@ -772,6 +788,9 @@ mod gui {
                     *words = words1;
                     *settings = settings1;
                     *stats = stats1;
+                    if let Some(time) = stats.by_day.get(&today).map(|x| x.working_time) {
+                        *working_time = time;
+                    }
                     true
                 } else {
                     false
@@ -845,11 +864,16 @@ mod gui {
                 false
             });
 
+            self.about_window.ui(ctx, |t, ui| {
+                t.ui(ui);
+                false
+            });
+
             egui::TopBottomPanel::bottom("bottom").show(ctx, |ui| {
                 let today = &self.stats.by_day.entry(today).or_default();
                 ui.monospace(format!(
                     "Working time: {:6} | Attempts: {:4} | New words: {:4}",
-                    print_time(working_time),
+                    print_time(*working_time),
                     today.attempts.right + today.attempts.wrong,
                     today.new_unknown_words_count,
                 ));
@@ -885,8 +909,8 @@ mod gui {
             } else {
                 "Words from text"
             })
-            .scroll(false)
-            .fixed_size((200., 100.))
+            .scroll(true)
+            .fixed_size((200., 400.))
             .collapsible(false)
         }
     }
@@ -929,6 +953,14 @@ mod gui {
                     self.text = read_clipboard().ok_or_else(String::new);
                 }
             });
+            if let Some(error) = &self.subtitles_error {
+                ui.separator();
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.;
+                    ui.add(Label::new("Error: ").text_color(Color32::RED).monospace());
+                    ui.monospace(error);
+                });
+            }
             ui.separator();
             match &mut self.text {
                 Ok(text) => {
@@ -937,14 +969,6 @@ mod gui {
                 Err(text) => {
                     ui.text_edit_multiline(text);
                 }
-            }
-            if let Some(error) = &self.subtitles_error {
-                ui.separator();
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing.x = 0.;
-                    ui.add(Label::new("Error: ").text_color(Color32::RED).monospace());
-                    ui.monospace(error);
-                });
             }
             action
         }
@@ -958,8 +982,8 @@ mod gui {
     impl WindowTrait for ImportWindow {
         fn create_window(&self) -> Window<'static> {
             Window::new("Import data")
-                .scroll(false)
-                .fixed_size((200., 100.))
+                .scroll(true)
+                .fixed_size((200., 400.))
                 .collapsible(false)
         }
     }
@@ -989,6 +1013,14 @@ mod gui {
                     self.text = read_clipboard().ok_or_else(String::new);
                 }
             });
+            if let Some(error) = &self.error {
+                ui.separator();
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.;
+                    ui.add(Label::new("Error: ").text_color(Color32::RED).monospace());
+                    ui.monospace(error);
+                });
+            }
             ui.separator();
             match &mut self.text {
                 Ok(text) => {
@@ -997,14 +1029,6 @@ mod gui {
                 Err(text) => {
                     ui.text_edit_multiline(text);
                 }
-            }
-            if let Some(error) = &self.error {
-                ui.separator();
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing.x = 0.;
-                    ui.add(Label::new("Error: ").text_color(Color32::RED).monospace());
-                    ui.monospace(error);
-                });
             }
             action
         }
@@ -1096,6 +1120,46 @@ mod gui {
             } else {
                 settings.use_keyboard_layout = false;
             }
+        }
+    }
+
+    struct AboutWindow;
+
+    impl WindowTrait for AboutWindow {
+        fn create_window(&self) -> Window<'static> {
+            Window::new("About")
+                .scroll(false)
+                .fixed_size((300., 100.))
+                .collapsible(false)
+        }
+    }
+
+    impl AboutWindow {
+        fn ui(&mut self, ui: &mut Ui) {
+            ui.heading("Learn Words");
+            ui.separator();
+            ui.label("This is the program to learn words in foreign languages.");
+            ui.separator();
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.;
+                ui.add(egui::Label::new("Version: ").strong());
+                ui.label("0.1.0");
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.;
+                ui.add(egui::Label::new("Author: ").strong());
+                ui.label("Ilya Sheprut");
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.;
+                ui.add(egui::Label::new("License: ").strong());
+                ui.label("MIT or Apache 2.0");
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.;
+                ui.add(egui::Label::new("Repository: ").strong());
+                ui.hyperlink("https://github.com/optozorax/learn_words");
+            });
         }
     }
 
@@ -1625,7 +1689,7 @@ mod gui {
                     return;
                 }
 
-                let position = ::rand::random::<usize>() % self.to_type_today.len();
+                let position = macroquad::rand::rand() as usize % self.to_type_today.len();
                 let word = &self.to_type_today[position];
                 if !words.is_learned(word) {
                     let result = words.get_word_to_learn(word, today);
@@ -1665,6 +1729,7 @@ mod gui {
             today: Day,
             day_stats: &mut DayStatistics,
             settings: &Settings,
+            save: &mut bool,
         ) {
             egui::Window::new("Learn words")
                 .fixed_size((300., 100.))
@@ -1689,6 +1754,7 @@ mod gui {
                         for i in &mut correct_answer.known_words {
                             ui.add(egui::TextEdit::singleline(i).enabled(false));
                         }
+                        let mut give_next_focus = 0;
                         for (hint, i) in correct_answer
                             .words_to_type
                             .iter()
@@ -1697,6 +1763,16 @@ mod gui {
                             let response = ui.add(egui::TextEdit::singleline(i).hint_text(hint));
                             if settings.use_keyboard_layout {
                                 settings.keyboard_layout.change(hint, i);
+                            }
+                            if give_next_focus == 1 {
+                                response.request_focus();
+                                give_next_focus = 2;
+                            }
+                            if response.has_focus()
+                                && is_key_pressed(KeyCode::Enter)
+                                && give_next_focus == 0
+                            {
+                                give_next_focus = 1;
                             }
                             if !focus_gained && *gain_focus {
                                 response.request_focus();
@@ -1712,13 +1788,27 @@ mod gui {
                             if settings.use_keyboard_layout {
                                 settings.keyboard_layout.change(correct, i);
                             }
+                            if give_next_focus == 1 {
+                                response.request_focus();
+                                give_next_focus = 2;
+                            }
+                            if response.has_focus()
+                                && is_key_pressed(KeyCode::Enter)
+                                && give_next_focus == 0
+                            {
+                                give_next_focus = 1;
+                            }
                             if !focus_gained && *gain_focus {
                                 response.request_focus();
                                 focus_gained = true;
                                 *gain_focus = false;
                             }
                         }
-                        if ui.button("Check").clicked() {
+                        let response = ui.button("Check");
+                        if give_next_focus == 1 {
+                            response.request_focus();
+                        }
+                        if response.clicked() {
                             let mut words_to_type_result = Vec::new();
                             let mut words_to_guess_result = Vec::new();
                             for (answer, i) in correct_answer
@@ -1810,6 +1900,7 @@ mod gui {
                         }
                         if response.clicked() {
                             self.pick_current_type(words, today);
+                            *save = true;
                         }
                     }
                 });
@@ -1949,8 +2040,8 @@ impl PauseDetector {
         }
     }
 
-    fn get_working_time(&self) -> f64 {
-        self.time_without_pauses
+    fn get_working_time(&mut self) -> &mut f64 {
+        &mut self.time_without_pauses
     }
 }
 
@@ -1968,14 +2059,7 @@ fn window_conf() -> Conf {
 async fn main() {
     /// Приватная функция
     fn current_day() -> Day {
-        use std::time::SystemTime;
-        Day(SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            / 60
-            / 60
-            / 24)
+        Day((miniquad::date::now() / 60. / 60. / 24.) as _)
     }
     let today = current_day();
 
@@ -1997,7 +2081,7 @@ async fn main() {
         settings,
         stats,
         today,
-        pause_detector.get_working_time(),
+        *pause_detector.get_working_time(),
     );
 
     let texture = Texture2D::from_rgba8(1, 1, &[192, 192, 192, 128]);
