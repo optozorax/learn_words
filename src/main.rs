@@ -81,17 +81,17 @@ enum WordStatus {
         /// Когда это слово в последний раз изучали
         last_learn: Day,
 
-        /// Количество изучений слова, при поиске того что надо печатать, проходим по всему массиву
-        learns: Vec<LearnType>,
-
         /// Количество learns, которое уже преодолено
         current_level: u8,
+
+        /// Количество вводов для текущего уровня
+        current_count: u8,
 
         /// Статистика
         stats: TypingStats,
     },
 
-    /// Мы знаем это слово
+    // Мы знаем это слово
     Learned {
         translation: String,
 
@@ -101,16 +101,22 @@ enum WordStatus {
 }
 
 impl WordStatus {
-    fn register_attempt(&mut self, correct: bool, today: Day, day_stats: &mut DayStatistics) {
+    fn register_attempt(
+        &mut self,
+        correct: bool,
+        today: Day,
+        day_stats: &mut DayStatistics,
+        type_count: &[LearnType],
+    ) {
         use WordStatus::*;
         match self {
             KnowPreviously | TrashWord | Learned { .. } => unreachable!(),
             ToLearn {
                 stats,
-                learns,
                 last_learn,
                 translation,
                 current_level,
+                current_count,
             } => {
                 if correct {
                     stats.right += 1;
@@ -120,31 +126,21 @@ impl WordStatus {
                     day_stats.attempts.wrong += 1;
                 }
 
-                let mut registered = false;
-
                 if correct {
-                    let mut other_learns = Vec::new();
-                    std::mem::swap(&mut other_learns, learns);
-                    *learns = other_learns
-                        .into_iter()
-                        .filter_map(|mut learn| {
-                            if learn.can_learn_today(*last_learn, today) && !registered {
-                                registered = true;
-                                if learn.count > 1 {
-                                    learn.count -= 1;
-                                    Some(learn)
-                                } else {
-                                    *last_learn = today;
-                                    *current_level += 1;
-                                    None
-                                }
+                    for learn in type_count.iter().skip(*current_level as _) {
+                        if learn.can_learn_today(*last_learn, today) {
+                            if *current_count + 1 != learn.count {
+                                *current_count += 1;
                             } else {
-                                Some(learn)
+                                *last_learn = today;
+                                *current_level += 1;
+                                *current_count = 0;
                             }
-                        })
-                        .collect();
+                            break;
+                        }
+                    }
 
-                    if learns.is_empty() {
+                    if *current_level as usize == type_count.len() {
                         *self = WordStatus::Learned {
                             translation: translation.clone(),
                             stats: *stats,
@@ -165,13 +161,16 @@ impl WordStatus {
         }
     }
 
-    fn can_learn_today(&self, today: Day) -> bool {
+    fn can_learn_today(&self, today: Day, type_count: &[LearnType]) -> bool {
         if let WordStatus::ToLearn {
-            last_learn, learns, ..
+            last_learn,
+            current_level,
+            ..
         } = self
         {
-            learns
+            type_count
                 .iter()
+                .skip(*current_level as _)
                 .any(|learn| learn.can_learn_today(*last_learn, today))
         } else {
             false
@@ -204,7 +203,6 @@ impl Words {
         &mut self,
         word: String,
         info: WordsToAdd,
-        settings: &Settings,
         today: Day,
         day_stats: &mut DayStatistics,
     ) {
@@ -218,8 +216,8 @@ impl Words {
                     entry.push(WordStatus::ToLearn {
                         translation: translation.clone(),
                         last_learn: today,
-                        learns: settings.type_count.clone(),
                         current_level: 0,
+                        current_count: 0,
                         stats: Default::default(),
                     });
                     day_stats.new_unknown_words_count += 1;
@@ -231,8 +229,8 @@ impl Words {
                         .push(WordStatus::ToLearn {
                             translation: word.clone(),
                             last_learn: today,
-                            learns: settings.type_count.clone(),
                             current_level: 0,
+                            current_count: 0,
                             stats: Default::default(),
                         });
                 }
@@ -249,7 +247,7 @@ impl Words {
         true
     }
 
-    fn get_word_to_learn(&self, word: &str, today: Day) -> WordsToLearn {
+    fn get_word_to_learn(&self, word: &str, today: Day, type_count: &[LearnType]) -> WordsToLearn {
         let mut known_words = Vec::new();
         let mut words_to_type = Vec::new();
         let mut words_to_guess = Vec::new();
@@ -257,11 +255,11 @@ impl Words {
             if let WordStatus::ToLearn {
                 translation,
                 last_learn,
-                learns,
+                current_level,
                 ..
             } = i
             {
-                for learn in learns {
+                for learn in type_count.iter().skip(*current_level as _) {
                     if learn.can_learn_today(*last_learn, today) {
                         if learn.show_word {
                             words_to_type.push(translation.clone());
@@ -271,8 +269,9 @@ impl Words {
                         break;
                     }
                 }
-                if learns
+                if type_count
                     .iter()
+                    .skip(*current_level as _)
                     .all(|x| !x.can_learn_today(*last_learn, today))
                 {
                     known_words.push(translation.clone());
@@ -288,10 +287,14 @@ impl Words {
         }
     }
 
-    fn get_words_to_learn_today(&self, today: Day) -> Vec<String> {
+    fn get_words_to_learn_today(&self, today: Day, type_count: &[LearnType]) -> Vec<String> {
         self.0
             .iter()
-            .filter(|(_, statuses)| statuses.iter().any(|x| x.can_learn_today(today)))
+            .filter(|(_, statuses)| {
+                statuses
+                    .iter()
+                    .any(|x| x.can_learn_today(today, type_count))
+            })
             .map(|(word, _)| word.clone())
             .collect()
     }
@@ -303,10 +306,11 @@ impl Words {
         correct: bool,
         today: Day,
         day_stats: &mut DayStatistics,
+        type_count: &[LearnType],
     ) {
         for i in self.0.get_mut(word).unwrap() {
             if i.has_translation(translation) {
-                i.register_attempt(correct, today, day_stats);
+                i.register_attempt(correct, today, day_stats, type_count);
                 return;
             }
         }
@@ -353,10 +357,11 @@ fn get_words_subtitles(subtitles: &str) -> Result<Vec<String>, srtparse::ReaderE
 }
 
 fn get_words(text: &str) -> Vec<String> {
-    text.to_lowercase()
+    let words = text
+        .to_lowercase()
         .chars()
         .map(|c| {
-            if !c.is_alphabetic() && c != '\'' && c != '-' {
+            if !c.is_ascii_lowercase() && c != '\'' && c != '-' {
                 ' '
             } else {
                 c
@@ -366,9 +371,19 @@ fn get_words(text: &str) -> Vec<String> {
         .split(' ')
         .filter(|x| !x.is_empty())
         .map(|x| x.to_string())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>()
+        .collect::<Vec<_>>();
+
+    let freq = {
+        let mut result: BTreeMap<String, i64> = BTreeMap::new();
+        for i in words {
+            *result.entry(i).or_insert(0) += 1;
+        }
+        let mut result = result.into_iter().collect::<Vec<_>>();
+        result.sort_by(|a, b| b.1.cmp(&a.1));
+        result
+    };
+
+    freq.into_iter().map(|(s, _)| s).collect()
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -420,8 +435,6 @@ impl KeyboardLayout {
             result.lang2.insert(*b, *a);
         }
 
-        dbg!(&result);
-
         Ok(result)
     }
 
@@ -434,7 +447,13 @@ impl KeyboardLayout {
         };
         *to_change = to_change
             .chars()
-            .map(|x| if let Some(c) = lang.get(&x) { *c } else { x })
+            .map(|x| {
+                if let Some(c) = lang.get(&x).filter(|_| x != ' ') {
+                    *c
+                } else {
+                    x
+                }
+            })
             .collect();
     }
 }
@@ -443,8 +462,8 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             type_count: vec![
-                LearnType::show(0, 1),
-                LearnType::guess(0, 1),
+                LearnType::show(0, 2),
+                LearnType::guess(0, 3),
                 LearnType::guess(2, 5),
                 LearnType::guess(7, 5),
                 LearnType::guess(20, 5),
@@ -454,11 +473,6 @@ impl Default for Settings {
             keyboard_layout: Default::default(),
         }
     }
-}
-
-fn read_clipboard() -> Option<String> {
-    let result = miniquad::clipboard::get(unsafe { get_internal_gl().quad_context });
-    result
 }
 
 fn write_clipboard(s: &str) {
@@ -555,7 +569,7 @@ mod gui {
             today: Day,
             working_time: f64,
         ) -> Self {
-            let learn_window = LearnWordsWindow::new(&words, today);
+            let learn_window = LearnWordsWindow::new(&words, today, &settings.type_count);
             let known_words = words.calculate_known_words();
 
             let mut result = Self {
@@ -772,7 +786,9 @@ mod gui {
             let add_words_window = &mut self.add_words_window;
             window.ui(ctx, |t, ui| {
                 if let Some(words) = t.ui(ui, known_words) {
-                    *add_words_window = ClosableWindow::new(AddWordsWindow::new(words));
+                    if !words.is_empty() {
+                        *add_words_window = ClosableWindow::new(AddWordsWindow::new(words));
+                    }
                     true
                 } else {
                     false
@@ -797,7 +813,8 @@ mod gui {
                 }
             });
             if closed {
-                self.learn_window.update(&self.words, today);
+                self.learn_window
+                    .update(&self.words, today, &self.settings.type_count);
             }
 
             let window = &mut self.settings_window;
@@ -808,45 +825,47 @@ mod gui {
             });
 
             let window = &mut self.add_words_window;
-            let settings = &self.settings;
             let words = &mut self.words;
             let stats = &mut self.stats;
+            let mut save = false;
             let closed = window.ui(ctx, |t, ui| {
                 if let Some((word, to_add, close)) = t.ui(ui) {
-                    words.add_word(
-                        word,
-                        to_add,
-                        settings,
-                        today,
-                        stats.by_day.entry(today).or_default(),
-                    );
+                    words.add_word(word, to_add, today, stats.by_day.entry(today).or_default());
+                    save = true;
                     close
                 } else {
                     false
                 }
             });
             if closed {
-                self.learn_window.update(&self.words, today);
+                self.learn_window
+                    .update(&self.words, today, &self.settings.type_count);
+                self.known_words = self.words.calculate_known_words();
+                self.save(today, *working_time);
+            }
+            if save {
+                self.save(today, *working_time);
             }
 
             let window = &mut self.add_custom_words_window;
-            let settings = &self.settings;
             let words = &mut self.words;
             let stats = &mut self.stats;
+            let mut save = false;
             let closed = window.ui(ctx, |t, ui| {
                 if let Some((word, to_add)) = t.ui(ui) {
-                    words.add_word(
-                        word,
-                        to_add,
-                        settings,
-                        today,
-                        stats.by_day.entry(today).or_default(),
-                    );
+                    words.add_word(word, to_add, today, stats.by_day.entry(today).or_default());
+                    save = true;
                 }
                 false
             });
             if closed {
-                self.learn_window.update(&self.words, today);
+                self.learn_window
+                    .update(&self.words, today, &self.settings.type_count);
+                self.known_words = self.words.calculate_known_words();
+                self.save(today, *working_time);
+            }
+            if save {
+                self.save(today, *working_time);
             }
 
             self.full_stats_window.ui(ctx, |t, ui| {
@@ -899,7 +918,7 @@ mod gui {
     struct LoadTextWindow {
         load_subtitles: bool,
         subtitles_error: Option<String>,
-        text: Result<String, String>,
+        text: String,
     }
 
     impl WindowTrait for LoadTextWindow {
@@ -910,7 +929,7 @@ mod gui {
                 "Words from text"
             })
             .scroll(true)
-            .fixed_size((200., 400.))
+            .fixed_size((200., 200.))
             .collapsible(false)
         }
     }
@@ -920,7 +939,7 @@ mod gui {
             Self {
                 load_subtitles,
                 subtitles_error: None,
-                text: read_clipboard().ok_or_else(String::new),
+                text: String::new(),
             }
         }
 
@@ -928,7 +947,7 @@ mod gui {
             let mut action = None;
             ui.horizontal(|ui| {
                 if ui.button("Use this text").clicked() {
-                    let text = self.text.as_ref().unwrap_or_else(|x| x);
+                    let text = &self.text;
 
                     let words = if self.load_subtitles {
                         match get_words_subtitles(&text) {
@@ -949,9 +968,6 @@ mod gui {
                         action = Some(words);
                     }
                 }
-                if ui.button("Update clipboard").clicked() {
-                    self.text = read_clipboard().ok_or_else(String::new);
-                }
             });
             if let Some(error) = &self.subtitles_error {
                 ui.separator();
@@ -962,20 +978,13 @@ mod gui {
                 });
             }
             ui.separator();
-            match &mut self.text {
-                Ok(text) => {
-                    text_preview(ui, text);
-                }
-                Err(text) => {
-                    ui.text_edit_multiline(text);
-                }
-            }
+            ui.text_edit_multiline(&mut self.text);
             action
         }
     }
 
     struct ImportWindow {
-        text: Result<String, String>,
+        text: String,
         error: Option<String>,
     }
 
@@ -983,7 +992,7 @@ mod gui {
         fn create_window(&self) -> Window<'static> {
             Window::new("Import data")
                 .scroll(true)
-                .fixed_size((200., 400.))
+                .fixed_size((200., 200.))
                 .collapsible(false)
         }
     }
@@ -991,7 +1000,7 @@ mod gui {
     impl ImportWindow {
         fn new() -> Self {
             Self {
-                text: read_clipboard().ok_or_else(String::new),
+                text: String::new(),
                 error: None,
             }
         }
@@ -1000,17 +1009,12 @@ mod gui {
             let mut action = None;
             ui.horizontal(|ui| {
                 if ui.button("Use this text").clicked() {
-                    let text = self.text.as_ref().unwrap_or_else(|x| x);
-
-                    match Program::load_from_string(text) {
+                    match Program::load_from_string(&self.text) {
                         Ok(result) => action = Some(result),
                         Err(error) => {
                             self.error = Some(format!("{:#?}", error));
                         }
                     }
-                }
-                if ui.button("Update clipboard").clicked() {
-                    self.text = read_clipboard().ok_or_else(String::new);
                 }
             });
             if let Some(error) = &self.error {
@@ -1022,14 +1026,7 @@ mod gui {
                 });
             }
             ui.separator();
-            match &mut self.text {
-                Ok(text) => {
-                    text_preview(ui, text);
-                }
-                Err(text) => {
-                    ui.text_edit_multiline(text);
-                }
-            }
+            ui.text_edit_multiline(&mut self.text);
             action
         }
     }
@@ -1673,16 +1670,16 @@ mod gui {
     }
 
     impl LearnWordsWindow {
-        fn new(words: &Words, today: Day) -> Self {
+        fn new(words: &Words, today: Day, type_count: &[LearnType]) -> Self {
             let mut result = Self {
                 to_type_today: Vec::new(),
                 current: LearnWords::None,
             };
-            result.update(words, today);
+            result.update(words, today, type_count);
             result
         }
 
-        fn pick_current_type(&mut self, words: &Words, today: Day) {
+        fn pick_current_type(&mut self, words: &Words, today: Day, type_count: &[LearnType]) {
             loop {
                 if self.to_type_today.is_empty() {
                     self.current = LearnWords::None;
@@ -1692,7 +1689,7 @@ mod gui {
                 let position = macroquad::rand::rand() as usize % self.to_type_today.len();
                 let word = &self.to_type_today[position];
                 if !words.is_learned(word) {
-                    let result = words.get_word_to_learn(word, today);
+                    let result = words.get_word_to_learn(word, today, type_count);
                     let words_to_type: Vec<String> = (0..result.words_to_type.len())
                         .map(|_| String::new())
                         .collect();
@@ -1717,9 +1714,9 @@ mod gui {
             }
         }
 
-        fn update(&mut self, words: &Words, today: Day) {
-            self.to_type_today = words.get_words_to_learn_today(today);
-            self.pick_current_type(words, today);
+        fn update(&mut self, words: &Words, today: Day, type_count: &[LearnType]) {
+            self.to_type_today = words.get_words_to_learn_today(today, type_count);
+            self.pick_current_type(words, today, type_count);
         }
 
         fn ui(
@@ -1747,7 +1744,8 @@ mod gui {
                         gain_focus,
                     } => {
                         ui.label(format!("Words remains: {}", self.to_type_today.len()));
-                        ui.label(format!("Word: {}", word));
+                        ui.separator();
+                        ui.add(Label::new(&word).heading().strong());
 
                         let mut focus_gained = false;
 
@@ -1760,7 +1758,8 @@ mod gui {
                             .iter()
                             .zip(words_to_type.iter_mut())
                         {
-                            let response = ui.add(egui::TextEdit::singleline(i).hint_text(hint));
+                            let response = ui
+                                .add(egui::TextEdit::singleline(i).hint_text(format!(" {}", hint)));
                             if settings.use_keyboard_layout {
                                 settings.keyboard_layout.change(hint, i);
                             }
@@ -1817,7 +1816,14 @@ mod gui {
                                 .zip(words_to_type.iter_mut())
                             {
                                 let correct = answer == i;
-                                words.register_attempt(word, answer, correct, today, day_stats);
+                                words.register_attempt(
+                                    word,
+                                    answer,
+                                    correct,
+                                    today,
+                                    day_stats,
+                                    &settings.type_count,
+                                );
                                 if correct {
                                     words_to_type_result.push(Ok(answer.clone()));
                                 } else {
@@ -1840,12 +1846,20 @@ mod gui {
                                         true,
                                         today,
                                         day_stats,
+                                        &settings.type_count,
                                     );
                                     corrects.remove(position);
                                     words_to_type_result.push(Ok(typed.clone()));
                                 } else {
                                     let answer = answers.remove(0);
-                                    words.register_attempt(word, &answer, false, today, day_stats);
+                                    words.register_attempt(
+                                        word,
+                                        &answer,
+                                        false,
+                                        today,
+                                        day_stats,
+                                        &settings.type_count,
+                                    );
                                     words_to_guess_result.push(Err((answer, typed.clone())));
                                 }
                             }
@@ -1867,7 +1881,8 @@ mod gui {
                         gain_focus,
                     } => {
                         ui.label(format!("Words remains: {}", self.to_type_today.len()));
-                        ui.label(format!("Word: {}", word));
+                        ui.separator();
+                        ui.add(Label::new(&word).heading().strong());
 
                         for i in known_words {
                             ui.add(egui::TextEdit::singleline(i).enabled(false));
@@ -1899,7 +1914,7 @@ mod gui {
                             *gain_focus = false;
                         }
                         if response.clicked() {
-                            self.pick_current_type(words, today);
+                            self.pick_current_type(words, today, &settings.type_count);
                             *save = true;
                         }
                     }
@@ -1980,16 +1995,6 @@ mod gui {
             f,
         )
     }
-
-    fn text_preview(ui: &mut Ui, text: &str) {
-        if text.len() > 200 {
-            ui.monospace(format!("{}...", text.chars().take(200).collect::<String>()));
-            ui.separator();
-            ui.label(format!("Total size: {:.1} KB", text.len() as f64 / 1024.0));
-        } else {
-            ui.label(&*text);
-        }
-    }
 }
 
 struct PauseDetector {
@@ -2017,6 +2022,10 @@ impl PauseDetector {
         let mouse_offset = (self.last_mouse_position.0 - current_mouse_position.0).abs()
             + (self.last_mouse_position.1 - current_mouse_position.1).abs();
         let mouse_not_moving = mouse_offset < 0.01;
+        let mouse_not_clicking = !is_mouse_button_pressed(MouseButton::Right)
+            && !is_mouse_button_pressed(MouseButton::Left)
+            && !is_mouse_button_pressed(MouseButton::Middle)
+            && !is_mouse_button_pressed(MouseButton::Unknown);
         let keyboard_not_typing = get_last_key_pressed().is_none();
 
         self.last_mouse_position = current_mouse_position;
@@ -2026,7 +2035,7 @@ impl PauseDetector {
         }
         self.last_time = now;
 
-        if mouse_not_moving && keyboard_not_typing {
+        if mouse_not_moving && keyboard_not_typing && mouse_not_clicking {
             if self.pausing {
                 now - self.time > settings.time_to_pause
             } else {
@@ -2049,14 +2058,22 @@ fn window_conf() -> Conf {
     Conf {
         window_title: "Learn Words".to_owned(),
         high_dpi: true,
-        window_width: 1024,
-        window_height: 768,
+        window_width: 1920,
+        window_height: 1080,
         ..Default::default()
     }
 }
 
+fn user_dpi() -> &'static mut f32 {
+    &mut unsafe { macroquad::prelude::get_internal_gl() }
+        .quad_context
+        .user_dpi
+}
+
 #[macroquad::main(window_conf)]
 async fn main() {
+    *user_dpi() = 1.75;
+
     /// Приватная функция
     fn current_day() -> Day {
         Day((miniquad::date::now() / 60. / 60. / 24.) as _)
