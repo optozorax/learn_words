@@ -14,6 +14,7 @@ egui = "0.13.1"
 srtparse = "0.2.0"
 chrono = "0.4.19"
 quad-storage = "0.1.2"
+strsim = "0.10.0"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 color-backtrace = "0.5.0"

@@ -559,6 +559,7 @@ mod gui {
         import_window: ClosableWindow<ImportWindow>,
         settings_window: ClosableWindow<SettingsWindow>,
         about_window: ClosableWindow<AboutWindow>,
+        search_words_window: ClosableWindow<SearchWordsWindow>,
     }
 
     impl Program {
@@ -590,6 +591,7 @@ mod gui {
                 import_window: Default::default(),
                 settings_window: Default::default(),
                 about_window: Default::default(),
+                search_words_window: Default::default(),
             };
 
             result.open_activity(today, working_time);
@@ -660,6 +662,10 @@ mod gui {
                             self.add_custom_words_window = ClosableWindow::new(Default::default());
                         }
                     });
+                    if ui.button("Search").clicked() {
+                        self.search_words_window =
+                            ClosableWindow::new(SearchWordsWindow::new(String::new(), &self.words));
+                    }
                     menu::menu(ui, "Statistics", |ui| {
                         if ui.button("Full").clicked() {
                             self.full_stats_window = ClosableWindow::new(FullStatsWindow {
@@ -827,9 +833,10 @@ mod gui {
             let window = &mut self.add_words_window;
             let words = &mut self.words;
             let stats = &mut self.stats;
+            let search_words_window = &mut self.search_words_window;
             let mut save = false;
             let closed = window.ui(ctx, |t, ui| {
-                if let Some((word, to_add, close)) = t.ui(ui) {
+                if let Some((word, to_add, close)) = t.ui(ui, search_words_window, words) {
                     words.add_word(word, to_add, today, stats.by_day.entry(today).or_default());
                     save = true;
                     close
@@ -885,6 +892,12 @@ mod gui {
 
             self.about_window.ui(ctx, |t, ui| {
                 t.ui(ui);
+                false
+            });
+
+            let words = &self.words;
+            self.search_words_window.ui(ctx, |t, ui| {
+                t.ui(ui, words);
                 false
             });
 
@@ -1160,6 +1173,121 @@ mod gui {
         }
     }
 
+    struct SearchWordsWindow {
+        search_string: String,
+        found_variants: Vec<String>,
+        show_inners: bool,
+    }
+
+    impl WindowTrait for SearchWordsWindow {
+        fn create_window(&self) -> Window<'static> {
+            Window::new("Search words")
+                .scroll(false)
+                .fixed_size((200., 300.))
+                .collapsible(false)
+        }
+    }
+
+    impl SearchWordsWindow {
+        fn new(search_string: String, words: &Words) -> Self {
+            let mut result = Self {
+                search_string,
+                found_variants: Vec::new(),
+                show_inners: false,
+            };
+            result.update(words);
+            result
+        }
+
+        fn update_new(&mut self, search_string: String, words: &Words) {
+            if search_string != self.search_string {
+                self.search_string = search_string;
+                self.update(words);
+            }
+        }
+
+        fn update(&mut self, words: &Words) {
+            const ACCEPTED_LEVENSHTEIN: usize = 4;
+            let mut results = Vec::new();
+            for word in words.0.keys() {
+                let levenshtein = strsim::levenshtein(word, &self.search_string);
+                if levenshtein < ACCEPTED_LEVENSHTEIN {
+                    let jaro = strsim::jaro(word, &self.search_string);
+                    results.push((levenshtein, jaro, word.clone()));
+                }
+            }
+            results.sort_by(|a, b| {
+                if a.0 == b.0 {
+                    a.1.partial_cmp(&b.1).unwrap()
+                } else {
+                    a.0.cmp(&b.0)
+                }
+            });
+            self.found_variants = results.into_iter().map(|(_, _, w)| w).collect();
+        }
+
+        fn find_word(this: &mut Option<Self>, search_string: String, words: &Words) {
+            if let Some(window) = this {
+                window.update_new(search_string, words);
+            } else {
+                *this = Some(Self::new(search_string, words));
+            }
+        }
+
+        fn ui(&mut self, ui: &mut Ui, words: &Words) {
+            if ui
+                .add(
+                    TextEdit::singleline(&mut self.search_string)
+                        .hint_text("Type here to find word..."),
+                )
+                .changed()
+            {
+                self.update(words);
+            }
+            ui.checkbox(&mut self.show_inners, "Show inners");
+            ui.separator();
+            ScrollArea::from_max_height(200.0).show(ui, |ui| {
+                if self.search_string.is_empty() {
+                    if self.show_inners {
+                        for (n, (word, translations)) in words.0.iter().enumerate() {
+                            // todo добавить сюда кнопки редактирования и удаления
+                            ui.heading(format!("{}. {}", n, word));
+                            for word_status in translations {
+                                ui.allocate_space(egui::vec2(1.0, 5.0));
+                                word_status_show_ui(word_status, ui);
+                            }
+                            ui.separator();
+                        }
+                    } else {
+                        for (n, word) in words.0.keys().enumerate() {
+                            // todo добавить сюда кнопки редактирования и удаления
+                            ui.label(format!("{}. {}", n, word));
+                        }
+                    }
+                } else if self.show_inners {
+                    for (word, translations) in self
+                        .found_variants
+                        .iter()
+                        .map(|x| (x, words.0.get(x).unwrap()))
+                    {
+                        // todo добавить сюда кнопки редактирования и удаления
+                        ui.heading(word);
+                        for word_status in translations {
+                            ui.allocate_space(egui::vec2(1.0, 5.0));
+                            word_status_show_ui(word_status, ui);
+                        }
+                        ui.separator();
+                    }
+                } else {
+                    for word in &self.found_variants {
+                        // todo добавить сюда кнопки редактирования и удаления
+                        ui.label(word);
+                    }
+                }
+            });
+        }
+    }
+
     struct AddWordsWindow {
         words: Vec<String>,
         translations: String,
@@ -1182,9 +1310,15 @@ mod gui {
             }
         }
 
-        fn ui(&mut self, ui: &mut Ui) -> Option<(String, WordsToAdd, bool)> {
+        fn ui(
+            &mut self,
+            ui: &mut Ui,
+            search_words_window: &mut ClosableWindow<SearchWordsWindow>,
+            words: &Words,
+        ) -> Option<(String, WordsToAdd, bool)> {
             let mut action = None;
             ui.label(format!("Words remains: {}", self.words.len()));
+            SearchWordsWindow::find_word(&mut search_words_window.0, self.words[0].clone(), words);
             ui.separator();
             if let Some((word, to_add)) =
                 word_to_add(ui, &mut self.words[0], &mut self.translations)
@@ -2085,6 +2219,177 @@ mod gui {
             Color32::from_rgb_additive(255, 128, 128),
             f,
         )
+    }
+
+    fn word_status_show_ui(word: &WordStatus, ui: &mut Ui) {
+        use WordStatus::*;
+        match word {
+            KnowPreviously => ui.label("Known"),
+            TrashWord => ui.label("Trash"),
+            ToLearn {
+                translation,
+                last_learn,
+                current_level,
+                current_count,
+                stats,
+            } => {
+                ui.label(format!("To learn: '{}'", translation));
+                ui.label(format!("Attempts: +{}, -{}", stats.right, stats.wrong));
+                ui.label(format!("Last learned: {} day", last_learn.0));
+                ui.label(format!("Current level: {}", current_level));
+                ui.label(format!("Current correct writes: {}", current_count))
+            }
+            Learned { translation, stats } => {
+                ui.label(format!("Learned: '{}'", translation));
+                ui.label(format!("Attempts: +{}, -{}", stats.right, stats.wrong))
+            }
+        };
+    }
+
+    pub trait ComboBoxChoosable {
+        fn variants() -> &'static [&'static str];
+        fn get_number(&self) -> usize;
+        fn set_number(&mut self, number: usize);
+    }
+
+    pub fn egui_combo_label<T: ComboBoxChoosable>(ui: &mut Ui, label: &str, t: &mut T) -> bool {
+        let mut is_changed = false;
+
+        let mut current_type = t.get_number();
+        let previous_type = current_type;
+
+        ui.horizontal(|ui| {
+            ui.label(label);
+            for (pos, name) in T::variants().iter().enumerate() {
+                ui.selectable_value(&mut current_type, pos, *name);
+            }
+        });
+
+        if current_type != previous_type {
+            t.set_number(current_type);
+            is_changed = true;
+        }
+
+        is_changed
+    }
+
+    impl ComboBoxChoosable for WordStatus {
+        fn variants() -> &'static [&'static str] {
+            &["Known", "Trash", "To learn", "Learned."]
+        }
+        fn get_number(&self) -> usize {
+            use WordStatus::*;
+            match self {
+                KnowPreviously => 0,
+                TrashWord => 1,
+                ToLearn { .. } => 2,
+                Learned { .. } => 3,
+            }
+        }
+        fn set_number(&mut self, number: usize) {
+            use WordStatus::*;
+            *self = match number {
+                0 => KnowPreviously,
+                1 => TrashWord,
+                2 => {
+                    if let Learned { translation, stats } = self {
+                        ToLearn {
+                            translation: translation.to_string(),
+                            stats: *stats,
+                            last_learn: Day(0),
+                            current_level: 0,
+                            current_count: 0,
+                        }
+                    } else {
+                        ToLearn {
+                            translation: String::new(),
+                            stats: TypingStats { right: 0, wrong: 0 },
+                            last_learn: Day(0),
+                            current_level: 0,
+                            current_count: 0,
+                        }
+                    }
+                }
+                3 => {
+                    if let ToLearn {
+                        translation, stats, ..
+                    } = self
+                    {
+                        Learned {
+                            translation: translation.to_string(),
+                            stats: *stats,
+                        }
+                    } else {
+                        Learned {
+                            translation: String::new(),
+                            stats: TypingStats { right: 0, wrong: 0 },
+                        }
+                    }
+                }
+                _ => unreachable!(),
+            };
+        }
+    }
+
+    fn word_status_edit_ui(word: &mut WordStatus, ui: &mut Ui) {
+        use WordStatus::*;
+        egui_combo_label(ui, "Type:", word);
+        if let ToLearn {
+            translation, stats, ..
+        }
+        | Learned { translation, stats } = word
+        {
+            ui.separator();
+            ui.text_edit_singleline(translation);
+            ui.horizontal(|ui| {
+                ui.label("Right attempts: ");
+                ui.add(
+                    egui::DragValue::new(&mut stats.right)
+                        .clamp_range(0..=100)
+                        .speed(1.0),
+                );
+            });
+            ui.horizontal(|ui| {
+                ui.label("Wrong attempts: ");
+                ui.add(
+                    egui::DragValue::new(&mut stats.wrong)
+                        .clamp_range(0..=100)
+                        .speed(1.0),
+                );
+            });
+        }
+        if let ToLearn {
+            last_learn,
+            current_level,
+            current_count,
+            ..
+        } = word
+        {
+            ui.horizontal(|ui| {
+                ui.label("Last learn: ");
+                ui.add(
+                    egui::DragValue::new(&mut last_learn.0)
+                        .clamp_range(0..=100_000)
+                        .speed(1.0),
+                );
+            });
+            ui.horizontal(|ui| {
+                ui.label("Current level: ");
+                ui.add(
+                    egui::DragValue::new(current_level)
+                        .clamp_range(0..=100)
+                        .speed(1.0),
+                );
+            });
+            ui.horizontal(|ui| {
+                ui.label("Current correct writes: ");
+                ui.add(
+                    egui::DragValue::new(current_count)
+                        .clamp_range(0..=100)
+                        .speed(1.0),
+                );
+            });
+        }
     }
 }
 
