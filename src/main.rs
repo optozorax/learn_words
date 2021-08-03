@@ -1655,6 +1655,7 @@ mod gui {
         None,
         Typing {
             word: String,
+            word_by_hint: Option<String>,
             correct_answer: WordsToLearn,
             words_to_type: Vec<String>,
             words_to_guess: Vec<String>,
@@ -1701,6 +1702,7 @@ mod gui {
                     } else {
                         self.current = LearnWords::Typing {
                             word: word.clone(),
+                            word_by_hint: (!words_to_type.is_empty()).then(String::new),
                             correct_answer: result,
                             words_to_type,
                             words_to_guess,
@@ -1738,6 +1740,7 @@ mod gui {
                     }
                     LearnWords::Typing {
                         word,
+                        word_by_hint,
                         correct_answer,
                         words_to_type,
                         words_to_guess,
@@ -1745,21 +1748,56 @@ mod gui {
                     } => {
                         ui.label(format!("Words remains: {}", self.to_type_today.len()));
                         ui.separator();
-                        ui.add(Label::new(&word).heading().strong());
 
+                        let mut enabled = true;
                         let mut focus_gained = false;
+                        let mut give_next_focus = 0;
+
+                        if let Some(word_by_hint) = word_by_hint {
+                            ui.label("Word:");
+
+                            let response =
+                                ui.add(egui::TextEdit::singleline(word_by_hint).hint_text(&word));
+
+                            enabled = word_by_hint == word;
+
+                            if settings.use_keyboard_layout {
+                                settings.keyboard_layout.change(word, word_by_hint);
+                            }
+                            if give_next_focus == 1 {
+                                response.request_focus();
+                                give_next_focus = 2;
+                            }
+                            if response.has_focus()
+                                && is_key_pressed(KeyCode::Enter)
+                                && give_next_focus == 0
+                            {
+                                give_next_focus = 1;
+                            }
+                            if !focus_gained && *gain_focus {
+                                response.request_focus();
+                                focus_gained = true;
+                                *gain_focus = false;
+                            }
+
+                            ui.separator();
+                        } else {
+                            ui.add(Label::new(&word).heading().strong());
+                        }
 
                         for i in &mut correct_answer.known_words {
                             ui.add(egui::TextEdit::singleline(i).enabled(false));
                         }
-                        let mut give_next_focus = 0;
                         for (hint, i) in correct_answer
                             .words_to_type
                             .iter()
                             .zip(words_to_type.iter_mut())
                         {
-                            let response = ui
-                                .add(egui::TextEdit::singleline(i).hint_text(format!(" {}", hint)));
+                            let response = ui.add(
+                                egui::TextEdit::singleline(i)
+                                    .hint_text(format!(" {}", hint))
+                                    .enabled(enabled),
+                            );
                             if settings.use_keyboard_layout {
                                 settings.keyboard_layout.change(hint, i);
                             }
@@ -1783,7 +1821,7 @@ mod gui {
                             .iter_mut()
                             .zip(correct_answer.words_to_guess.iter())
                         {
-                            let response = ui.add(egui::TextEdit::singleline(i));
+                            let response = ui.add(egui::TextEdit::singleline(i).enabled(enabled));
                             if settings.use_keyboard_layout {
                                 settings.keyboard_layout.change(correct, i);
                             }
@@ -1803,7 +1841,7 @@ mod gui {
                                 *gain_focus = false;
                             }
                         }
-                        let response = ui.button("Check");
+                        let response = ui.add(Button::new("check").enabled(enabled));
                         if give_next_focus == 1 {
                             response.request_focus();
                         }
