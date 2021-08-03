@@ -3,6 +3,12 @@ use serde::*;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
+macro_rules! err {
+    () => {
+        macroquad::logging::error!("error at {}:{}", file!(), line!());
+    };
+}
+
 /// День
 #[derive(Serialize, Deserialize, Clone, Copy, Ord, PartialOrd, Eq, PartialEq)]
 pub struct Day(u64);
@@ -176,6 +182,24 @@ impl WordStatus {
             false
         }
     }
+
+    fn translation(&self) -> Option<&str> {
+        use WordStatus::*;
+        if let ToLearn { translation, .. } | Learned { translation, .. } = self {
+            Some(translation)
+        } else {
+            None
+        }
+    }
+
+    fn translation_mut(&mut self) -> Option<&mut String> {
+        use WordStatus::*;
+        if let ToLearn { translation, .. } | Learned { translation, .. } = self {
+            Some(translation)
+        } else {
+            None
+        }
+    }
 }
 
 /// Все слова в программе
@@ -239,12 +263,17 @@ impl Words {
     }
 
     fn is_learned(&self, word: &str) -> bool {
-        for i in self.0.get(word).unwrap() {
-            if matches!(i, WordStatus::ToLearn { .. }) {
-                return false;
+        if let Some(word) = self.0.get(word) {
+            for i in word {
+                if matches!(i, WordStatus::ToLearn { .. }) {
+                    return false;
+                }
             }
+            true
+        } else {
+            err!();
+            true
         }
-        true
     }
 
     fn get_word_to_learn(&self, word: &str, today: Day, type_count: &[LearnType]) -> WordsToLearn {
@@ -308,13 +337,17 @@ impl Words {
         day_stats: &mut DayStatistics,
         type_count: &[LearnType],
     ) {
-        for i in self.0.get_mut(word).unwrap() {
-            if i.has_translation(translation) {
-                i.register_attempt(correct, today, day_stats, type_count);
-                return;
+        if let Some(word) = self.0.get_mut(word) {
+            for i in word {
+                if i.has_translation(translation) {
+                    i.register_attempt(correct, today, day_stats, type_count);
+                    return;
+                }
             }
+            err!();
+        } else {
+            err!();
         }
-        unreachable!()
     }
 
     fn calculate_word_statistics(&self) -> BTreeMap<WordType, u64> {
@@ -342,6 +375,55 @@ impl Words {
             }
         }
         result
+    }
+
+    fn remove_word(&mut self, word: &str) {
+        let translations: Vec<String> = self
+            .0
+            .remove(word)
+            .unwrap()
+            .into_iter()
+            .filter_map(|x| x.translation().map(|x| x.to_owned()))
+            .collect();
+
+        for translation in translations {
+            if let Some(to_edit) = self.0.get_mut(&translation) {
+                *to_edit = to_edit
+                    .iter()
+                    .filter(|w| w.translation().map(|x| x != word).unwrap_or(true))
+                    .cloned()
+                    .collect();
+            }
+            if self.0.get(word).map(|x| x.is_empty()).unwrap_or(false) {
+                self.0.remove(&translation);
+            }
+        }
+    }
+
+    fn rename_word(&mut self, word: &str, new_word: &str) {
+        let status = self.0.remove(word).unwrap();
+        let translations: Vec<String> = status
+            .iter()
+            .filter_map(|x| x.translation().map(|x| x.to_owned()))
+            .collect();
+        self.0.insert(new_word.to_owned(), status);
+
+        for translation in translations {
+            if let Some(to_edit) = self.0.get_mut(&translation) {
+                *to_edit = to_edit
+                    .iter()
+                    .cloned()
+                    .map(|mut w| {
+                        if let Some(tr) = w.translation_mut() {
+                            if tr == word {
+                                *tr = new_word.to_string();
+                            }
+                        }
+                        w
+                    })
+                    .collect();
+            }
+        }
     }
 }
 
@@ -560,6 +642,7 @@ mod gui {
         settings_window: ClosableWindow<SettingsWindow>,
         about_window: ClosableWindow<AboutWindow>,
         search_words_window: ClosableWindow<SearchWordsWindow>,
+        edit_word_window: ClosableWindow<EditWordWindow>,
     }
 
     impl Program {
@@ -592,6 +675,8 @@ mod gui {
                 settings_window: Default::default(),
                 about_window: Default::default(),
                 search_words_window: Default::default(),
+
+                edit_word_window: Default::default(),
             };
 
             result.open_activity(today, working_time);
@@ -896,10 +981,31 @@ mod gui {
             });
 
             let words = &self.words;
+            let mut edit_word = None;
             self.search_words_window.ui(ctx, |t, ui| {
-                t.ui(ui, words);
+                edit_word = t.ui(ui, words);
                 false
             });
+            if let Some(edit_word) = edit_word {
+                self.edit_word_window = ClosableWindow::new(EditWordWindow::new(edit_word));
+            }
+
+            let words = &mut self.words;
+            let mut update_search = false;
+            let closed = self.edit_word_window.ui(ctx, |t, ui| {
+                let result = t.ui(ui, words);
+                update_search = result.1;
+                result.0
+            });
+            if update_search {
+                if let Some(window) = &mut self.search_words_window.0 {
+                    window.update(&self.words);
+                }
+            }
+            if closed || update_search {
+                self.known_words = self.words.calculate_known_words();
+                self.save(today, *working_time);
+            }
 
             egui::TopBottomPanel::bottom("bottom").show(ctx, |ui| {
                 let today = &self.stats.by_day.entry(today).or_default();
@@ -1234,7 +1340,7 @@ mod gui {
             }
         }
 
-        fn ui(&mut self, ui: &mut Ui, words: &Words) {
+        fn ui(&mut self, ui: &mut Ui, words: &Words) -> Option<String> {
             if ui
                 .add(
                     TextEdit::singleline(&mut self.search_string)
@@ -1246,12 +1352,19 @@ mod gui {
             }
             ui.checkbox(&mut self.show_inners, "Show inners");
             ui.separator();
+            let mut edit_word = None;
             ScrollArea::from_max_height(200.0).show(ui, |ui| {
                 if self.search_string.is_empty() {
                     if self.show_inners {
                         for (n, (word, translations)) in words.0.iter().enumerate() {
-                            // todo добавить сюда кнопки редактирования и удаления
-                            ui.heading(format!("{}. {}", n, word));
+                            ui.with_layout(Layout::right_to_left(), |ui| {
+                                if ui.button("✏").on_hover_text("Edit").clicked() {
+                                    edit_word = Some(word.clone());
+                                }
+                                ui.with_layout(Layout::left_to_right(), |ui| {
+                                    ui.heading(format!("{}. {}", n, word));
+                                });
+                            });
                             for word_status in translations {
                                 ui.allocate_space(egui::vec2(1.0, 5.0));
                                 word_status_show_ui(word_status, ui);
@@ -1260,8 +1373,14 @@ mod gui {
                         }
                     } else {
                         for (n, word) in words.0.keys().enumerate() {
-                            // todo добавить сюда кнопки редактирования и удаления
-                            ui.label(format!("{}. {}", n, word));
+                            ui.with_layout(Layout::right_to_left(), |ui| {
+                                if ui.button("✏").on_hover_text("Edit").clicked() {
+                                    edit_word = Some(word.clone());
+                                }
+                                ui.with_layout(Layout::left_to_right(), |ui| {
+                                    ui.label(format!("{}. {}", n, word));
+                                });
+                            });
                         }
                     }
                 } else if self.show_inners {
@@ -1270,8 +1389,14 @@ mod gui {
                         .iter()
                         .map(|x| (x, words.0.get(x).unwrap()))
                     {
-                        // todo добавить сюда кнопки редактирования и удаления
-                        ui.heading(word);
+                        ui.with_layout(Layout::right_to_left(), |ui| {
+                            if ui.button("✏").on_hover_text("Edit").clicked() {
+                                edit_word = Some(word.clone());
+                            }
+                            ui.with_layout(Layout::left_to_right(), |ui| {
+                                ui.heading(word);
+                            });
+                        });
                         for word_status in translations {
                             ui.allocate_space(egui::vec2(1.0, 5.0));
                             word_status_show_ui(word_status, ui);
@@ -1280,11 +1405,74 @@ mod gui {
                     }
                 } else {
                     for word in &self.found_variants {
-                        // todo добавить сюда кнопки редактирования и удаления
-                        ui.label(word);
+                        ui.with_layout(Layout::right_to_left(), |ui| {
+                            if ui.button("✏").on_hover_text("Edit").clicked() {
+                                edit_word = Some(word.clone());
+                            }
+                            ui.with_layout(Layout::left_to_right(), |ui| {
+                                ui.label(word);
+                            });
+                        });
                     }
                 }
             });
+            edit_word
+        }
+    }
+
+    struct EditWordWindow {
+        word: String,
+        word_to_edit: String,
+    }
+
+    impl WindowTrait for EditWordWindow {
+        fn create_window(&self) -> Window<'static> {
+            Window::new("Edit word")
+                .scroll(true)
+                .fixed_size((200., 300.))
+                .collapsible(false)
+        }
+    }
+
+    impl EditWordWindow {
+        fn new(word: String) -> Self {
+            Self {
+                word: word.clone(),
+                word_to_edit: word,
+            }
+        }
+
+        fn ui(&mut self, ui: &mut Ui, words: &mut Words) -> (bool, bool) {
+            ui.label("Please not edit words while typing in learning words window!");
+            if let Some(getted) = words.0.get_mut(&self.word) {
+                let mut remove_word = false;
+                ui.with_layout(Layout::right_to_left(), |ui| {
+                    if ui
+                        .add(Button::new("Delete").text_color(Color32::RED))
+                        .clicked()
+                    {
+                        remove_word = true;
+                    }
+                    ui.with_layout(Layout::left_to_right(), |ui| {
+                        ui.text_edit_singleline(&mut self.word_to_edit);
+                    });
+                });
+                for word in getted {
+                    ui.separator();
+                    word_status_edit_ui(word, ui);
+                }
+                if self.word_to_edit != self.word {
+                    words.rename_word(&self.word, &self.word_to_edit);
+                    self.word = self.word_to_edit.clone();
+                    return (false, true);
+                } else if remove_word {
+                    words.remove_word(&self.word);
+                    return (true, true);
+                }
+                (false, false)
+            } else {
+                (true, true)
+            }
         }
     }
 
@@ -2252,27 +2440,6 @@ mod gui {
         fn set_number(&mut self, number: usize);
     }
 
-    pub fn egui_combo_label<T: ComboBoxChoosable>(ui: &mut Ui, label: &str, t: &mut T) -> bool {
-        let mut is_changed = false;
-
-        let mut current_type = t.get_number();
-        let previous_type = current_type;
-
-        ui.horizontal(|ui| {
-            ui.label(label);
-            for (pos, name) in T::variants().iter().enumerate() {
-                ui.selectable_value(&mut current_type, pos, *name);
-            }
-        });
-
-        if current_type != previous_type {
-            t.set_number(current_type);
-            is_changed = true;
-        }
-
-        is_changed
-    }
-
     impl ComboBoxChoosable for WordStatus {
         fn variants() -> &'static [&'static str] {
             &["Known", "Trash", "To learn", "Learned."]
@@ -2333,13 +2500,30 @@ mod gui {
 
     fn word_status_edit_ui(word: &mut WordStatus, ui: &mut Ui) {
         use WordStatus::*;
-        egui_combo_label(ui, "Type:", word);
+
+        let mut current_type = word.get_number();
+        let previous_type = current_type;
+
+        ui.horizontal(|ui| {
+            for (pos, name) in WordStatus::variants().iter().enumerate().take(2) {
+                ui.selectable_value(&mut current_type, pos, *name);
+            }
+        });
+        ui.horizontal(|ui| {
+            for (pos, name) in WordStatus::variants().iter().enumerate().skip(2) {
+                ui.selectable_value(&mut current_type, pos, *name);
+            }
+        });
+
+        if current_type != previous_type {
+            word.set_number(current_type);
+        }
+
         if let ToLearn {
             translation, stats, ..
         }
         | Learned { translation, stats } = word
         {
-            ui.separator();
             ui.text_edit_singleline(translation);
             ui.horizontal(|ui| {
                 ui.label("Right attempts: ");
