@@ -1647,12 +1647,17 @@ mod gui {
     // Это окно нельзя закрыть
     struct LearnWordsWindow {
         /// То что надо ввести несколько раз повторяется, слово повторяется максимальное число из всех под-слов что с ним связано. Если слово уже известно, то надо
-        to_type_today: Vec<String>,
+        to_type_all: Vec<String>,
+        to_type_today: Option<Vec<String>>,
         current: LearnWords,
     }
 
     enum LearnWords {
         None,
+        Choose {
+            all_count: usize,
+            n: usize,
+        },
         Typing {
             word: String,
             word_by_hint: Option<String>,
@@ -1673,7 +1678,8 @@ mod gui {
     impl LearnWordsWindow {
         fn new(words: &Words, today: Day, type_count: &[LearnType]) -> Self {
             let mut result = Self {
-                to_type_today: Vec::new(),
+                to_type_all: Vec::new(),
+                to_type_today: None,
                 current: LearnWords::None,
             };
             result.update(words, today, type_count);
@@ -1682,42 +1688,59 @@ mod gui {
 
         fn pick_current_type(&mut self, words: &Words, today: Day, type_count: &[LearnType]) {
             loop {
-                if self.to_type_today.is_empty() {
+                if self.to_type_all.is_empty() {
                     self.current = LearnWords::None;
                     return;
                 }
 
-                let position = macroquad::rand::rand() as usize % self.to_type_today.len();
-                let word = &self.to_type_today[position];
-                if !words.is_learned(word) {
-                    let result = words.get_word_to_learn(word, today, type_count);
-                    let words_to_type: Vec<String> = (0..result.words_to_type.len())
-                        .map(|_| String::new())
-                        .collect();
-                    let words_to_guess: Vec<String> = (0..result.words_to_guess.len())
-                        .map(|_| String::new())
-                        .collect();
-                    if words_to_type.is_empty() && words_to_guess.is_empty() {
-                        self.to_type_today.remove(position);
+                if self
+                    .to_type_today
+                    .as_ref()
+                    .map(|x| x.is_empty())
+                    .unwrap_or(false)
+                {
+                    self.to_type_today = None;
+                }
+
+                if let Some(to_type_today) = &mut self.to_type_today {
+                    let position = macroquad::rand::rand() as usize % to_type_today.len();
+                    let word = &to_type_today[position];
+                    if !words.is_learned(word) {
+                        let result = words.get_word_to_learn(word, today, type_count);
+                        let words_to_type: Vec<String> = (0..result.words_to_type.len())
+                            .map(|_| String::new())
+                            .collect();
+                        let words_to_guess: Vec<String> = (0..result.words_to_guess.len())
+                            .map(|_| String::new())
+                            .collect();
+                        if words_to_type.is_empty() && words_to_guess.is_empty() {
+                            to_type_today.remove(position);
+                        } else {
+                            self.current = LearnWords::Typing {
+                                word: word.clone(),
+                                word_by_hint: (!words_to_type.is_empty()).then(String::new),
+                                correct_answer: result,
+                                words_to_type,
+                                words_to_guess,
+                                gain_focus: true,
+                            };
+                            return;
+                        }
                     } else {
-                        self.current = LearnWords::Typing {
-                            word: word.clone(),
-                            word_by_hint: (!words_to_type.is_empty()).then(String::new),
-                            correct_answer: result,
-                            words_to_type,
-                            words_to_guess,
-                            gain_focus: true,
-                        };
-                        return;
+                        to_type_today.remove(position);
                     }
                 } else {
-                    self.to_type_today.remove(position);
+                    self.current = LearnWords::Choose {
+                        all_count: self.to_type_all.len(),
+                        n: 20,
+                    };
+                    return;
                 }
             }
         }
 
         fn update(&mut self, words: &Words, today: Day, type_count: &[LearnType]) {
-            self.to_type_today = words.get_words_to_learn_today(today, type_count);
+            self.to_type_all = words.get_words_to_learn_today(today, type_count);
             self.pick_current_type(words, today, type_count);
         }
 
@@ -1738,6 +1761,30 @@ mod gui {
                     LearnWords::None => {
                         ui.label("🎉🎉🎉 Everything is learned for today! 🎉🎉🎉");
                     }
+                    LearnWords::Choose { all_count, n } => {
+                        ui.label(format!("Count of words to type today is {}", all_count));
+                        ui.horizontal(|ui| {
+                            ui.label("Choose count to type now: ");
+                            ui.add(
+                                egui::DragValue::new(n)
+                                    .clamp_range(1..=*all_count)
+                                    .speed(1.0),
+                            );
+                        });
+                        if ui.button("Choose").clicked() {
+                            self.to_type_today = Some(
+                                (0..*n)
+                                    .map(|_| {
+                                        self.to_type_all.remove(
+                                            macroquad::rand::rand() as usize
+                                                % self.to_type_all.len(),
+                                        )
+                                    })
+                                    .collect(),
+                            );
+                            self.pick_current_type(words, today, &settings.type_count);
+                        }
+                    }
                     LearnWords::Typing {
                         word,
                         word_by_hint,
@@ -1746,7 +1793,10 @@ mod gui {
                         words_to_guess,
                         gain_focus,
                     } => {
-                        ui.label(format!("Words remains: {}", self.to_type_today.len()));
+                        ui.label(format!(
+                            "Words remains: {}",
+                            self.to_type_today.as_ref().unwrap().len()
+                        ));
                         ui.separator();
 
                         let mut enabled = true;
@@ -1918,7 +1968,10 @@ mod gui {
                         words_to_guess,
                         gain_focus,
                     } => {
-                        ui.label(format!("Words remains: {}", self.to_type_today.len()));
+                        ui.label(format!(
+                            "Words remains: {}",
+                            self.to_type_today.as_ref().unwrap().len()
+                        ));
                         ui.separator();
                         ui.add(Label::new(&word).heading().strong());
 
