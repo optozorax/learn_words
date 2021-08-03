@@ -427,7 +427,7 @@ impl Words {
     }
 }
 
-fn get_words_subtitles(subtitles: &str) -> Result<Vec<String>, srtparse::ReaderError> {
+fn get_words_subtitles(subtitles: &str) -> Result<GetWordsResult, srtparse::ReaderError> {
     let subtitles = srtparse::from_str(subtitles)?;
     let text = subtitles
         .into_iter()
@@ -438,34 +438,43 @@ fn get_words_subtitles(subtitles: &str) -> Result<Vec<String>, srtparse::ReaderE
     Ok(get_words(&text))
 }
 
-fn get_words(text: &str) -> Vec<String> {
-    let words = text
-        .to_lowercase()
-        .chars()
-        .map(|c| {
-            if !c.is_ascii_lowercase() && c != '\'' && c != '-' {
-                ' '
+struct WordsWithContext(Vec<(String, Vec<std::ops::Range<usize>>)>);
+
+struct GetWordsResult {
+    text: String,
+    words_with_context: WordsWithContext,
+}
+
+fn get_words(text: &str) -> GetWordsResult {
+    fn is_word_symbol(c: char) -> bool {
+        c.is_alphabetic() || c == '\'' || c == '-'
+    }
+
+    let mut words = BTreeMap::new();
+    let mut current_word: Option<(String, usize)> = None;
+    for (i, c) in text.char_indices() {
+        if is_word_symbol(c) {
+            if let Some((word, _)) = &mut current_word {
+                *word += &c.to_lowercase().collect::<String>();
             } else {
-                c
+                current_word = Some((c.to_lowercase().collect(), i));
             }
-        })
-        .collect::<String>()
-        .split(' ')
-        .filter(|x| !x.is_empty())
-        .map(|x| x.to_string())
-        .collect::<Vec<_>>();
-
-    let freq = {
-        let mut result: BTreeMap<String, i64> = BTreeMap::new();
-        for i in words {
-            *result.entry(i).or_insert(0) += 1;
+        } else if let Some((word, start)) = &mut current_word {
+            words
+                .entry(word.clone())
+                .or_insert_with(Vec::new)
+                .push(*start..i);
+            current_word = None;
         }
-        let mut result = result.into_iter().collect::<Vec<_>>();
-        result.sort_by(|a, b| b.1.cmp(&a.1));
-        result
-    };
+    }
+    let mut words: Vec<_> = words.into_iter().collect();
 
-    freq.into_iter().map(|(s, _)| s).collect()
+    words.sort_by_key(|x| std::cmp::Reverse(x.1.len()));
+
+    GetWordsResult {
+        text: text.to_owned(),
+        words_with_context: WordsWithContext(words),
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -877,8 +886,11 @@ mod gui {
             let add_words_window = &mut self.add_words_window;
             window.ui(ctx, |t, ui| {
                 if let Some(words) = t.ui(ui, known_words) {
-                    if !words.is_empty() {
-                        *add_words_window = ClosableWindow::new(AddWordsWindow::new(words));
+                    if !words.words_with_context.0.is_empty() {
+                        *add_words_window = ClosableWindow::new(AddWordsWindow::new(
+                            words.text,
+                            words.words_with_context,
+                        ));
                     }
                     true
                 } else {
@@ -1062,7 +1074,7 @@ mod gui {
             }
         }
 
-        fn ui(&mut self, ui: &mut Ui, known_words: &BTreeSet<String>) -> Option<Vec<String>> {
+        fn ui(&mut self, ui: &mut Ui, known_words: &BTreeSet<String>) -> Option<GetWordsResult> {
             let mut action = None;
             ui.horizontal(|ui| {
                 if ui.button("Use this text").clicked() {
@@ -1079,11 +1091,11 @@ mod gui {
                     } else {
                         Some(get_words(&text))
                     };
-                    if let Some(words) = words {
-                        let words = words
-                            .into_iter()
-                            .filter(|x| !known_words.contains(x))
-                            .collect();
+                    if let Some(mut words) = words {
+                        words
+                            .words_with_context
+                            .0
+                            .retain(|x| !known_words.contains(&x.0));
                         action = Some(words);
                     }
                 }
@@ -1477,7 +1489,8 @@ mod gui {
     }
 
     struct AddWordsWindow {
-        words: Vec<String>,
+        text: String,
+        words: WordsWithContext,
         translations: String,
     }
 
@@ -1485,14 +1498,15 @@ mod gui {
         fn create_window(&self) -> Window<'static> {
             Window::new("Add words")
                 .scroll(false)
-                .fixed_size((200., 100.))
+                .fixed_size((200., 200.))
                 .collapsible(false)
         }
     }
 
     impl AddWordsWindow {
-        fn new(words: Vec<String>) -> Self {
+        fn new(text: String, words: WordsWithContext) -> Self {
             AddWordsWindow {
+                text,
                 words,
                 translations: String::new(),
             }
@@ -1505,15 +1519,45 @@ mod gui {
             words: &Words,
         ) -> Option<(String, WordsToAdd, bool)> {
             let mut action = None;
-            ui.label(format!("Words remains: {}", self.words.len()));
-            SearchWordsWindow::find_word(&mut search_words_window.0, self.words[0].clone(), words);
+            ui.label(format!("Words remains: {}", self.words.0.len()));
+            ui.label(format!("Occurences in text: {}", self.words.0[0].1.len()));
+            SearchWordsWindow::find_word(
+                &mut search_words_window.0,
+                self.words.0[0].0.clone(),
+                words,
+            );
+            ui.separator();
+            ScrollArea::from_max_height(200.0).show(ui, |ui| {
+                const CONTEXT_SIZE: usize = 50;
+                for range in &self.words.0[0].1 {
+                    let start = range.start.saturating_sub(CONTEXT_SIZE);
+                    let end = {
+                        let result = range.end + CONTEXT_SIZE;
+                        if result > self.text.len() {
+                            self.text.len()
+                        } else {
+                            result
+                        }
+                    };
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.;
+                        ui.label("...");
+                        ui.label(&self.text[start..range.start]);
+                        ui.add(egui::Label::new(&self.text[range.clone()]).strong());
+                        ui.label(&self.text[range.end..end]);
+                        ui.label("...");
+                    });
+
+                    ui.separator();
+                }
+            });
             ui.separator();
             if let Some((word, to_add)) =
-                word_to_add(ui, &mut self.words[0], &mut self.translations)
+                word_to_add(ui, &mut self.words.0[0].0, &mut self.translations)
             {
                 self.translations.clear();
-                self.words.remove(0);
-                action = Some((word, to_add, self.words.is_empty()));
+                self.words.0.remove(0);
+                action = Some((word, to_add, self.words.0.is_empty()));
             }
             action
         }
