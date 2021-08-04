@@ -1,3 +1,5 @@
+#![allow(clippy::collapsible_else_if)]
+
 use macroquad::prelude::*;
 use serde::*;
 use std::collections::BTreeMap;
@@ -200,6 +202,15 @@ impl WordStatus {
             None
         }
     }
+
+    fn level(&self) -> Option<u8> {
+        use WordStatus::*;
+        if let ToLearn { current_level, .. } = self {
+            Some(*current_level)
+        } else {
+            None
+        }
+    }
 }
 
 /// Все слова в программе
@@ -316,16 +327,26 @@ impl Words {
         }
     }
 
-    fn get_words_to_learn_today(&self, today: Day, type_count: &[LearnType]) -> Vec<String> {
-        self.0
-            .iter()
-            .filter(|(_, statuses)| {
-                statuses
-                    .iter()
-                    .any(|x| x.can_learn_today(today, type_count))
-            })
-            .map(|(word, _)| word.clone())
-            .collect()
+    fn get_words_to_learn_today(
+        &self,
+        today: Day,
+        type_count: &[LearnType],
+    ) -> (Vec<String>, Vec<String>) {
+        let mut new = Vec::new();
+        let mut repeat = Vec::new();
+        for (word, statuses) in &self.0 {
+            if statuses
+                .iter()
+                .any(|x| x.can_learn_today(today, type_count))
+            {
+                if statuses.iter().any(|x| x.level() == Some(0)) {
+                    new.push(word.clone());
+                } else {
+                    repeat.push(word.clone());
+                }
+            }
+        }
+        (repeat, new)
     }
 
     fn register_attempt(
@@ -443,16 +464,22 @@ struct WordsWithContext(Vec<(String, Vec<std::ops::Range<usize>>)>);
 struct GetWordsResult {
     text: String,
     words_with_context: WordsWithContext,
+    words_count: usize,
+    unique_words_count: usize,
+}
+
+fn is_word_symbol(c: char) -> bool {
+    c.is_alphabetic() || c == '\'' || c == '-'
 }
 
 fn get_words(text: &str) -> GetWordsResult {
-    fn is_word_symbol(c: char) -> bool {
-        c.is_alphabetic() || c == '\'' || c == '-'
-    }
-
+    let mut words_count = 0;
     let mut words = BTreeMap::new();
     let mut current_word: Option<(String, usize)> = None;
-    for (i, c) in text.char_indices() {
+    for (i, c) in text
+        .char_indices()
+        .chain(std::iter::once((text.len(), '.')))
+    {
         if is_word_symbol(c) {
             if let Some((word, _)) = &mut current_word {
                 *word += &c.to_lowercase().collect::<String>();
@@ -460,6 +487,7 @@ fn get_words(text: &str) -> GetWordsResult {
                 current_word = Some((c.to_lowercase().collect(), i));
             }
         } else if let Some((word, start)) = &mut current_word {
+            words_count += 1;
             words
                 .entry(word.clone())
                 .or_insert_with(Vec::new)
@@ -471,9 +499,13 @@ fn get_words(text: &str) -> GetWordsResult {
 
     words.sort_by_key(|x| std::cmp::Reverse(x.1.len()));
 
+    let unique_words_count = words.len();
+
     GetWordsResult {
         text: text.to_owned(),
         words_with_context: WordsWithContext(words),
+        words_count,
+        unique_words_count,
     }
 }
 
@@ -555,9 +587,9 @@ impl Default for Settings {
             type_count: vec![
                 LearnType::show(0, 2),
                 LearnType::guess(0, 3),
-                LearnType::guess(2, 5),
-                LearnType::guess(7, 5),
-                LearnType::guess(20, 5),
+                LearnType::guess(2, 3),
+                LearnType::guess(7, 2),
+                LearnType::guess(20, 2),
             ],
             time_to_pause: 15.,
             use_keyboard_layout: false,
@@ -631,6 +663,14 @@ mod gui {
         }
     }
 
+    fn dark_light_mode_switch(ui: &mut egui::Ui) {
+        let style: egui::Style = (*ui.ctx().style()).clone();
+        let new_visuals = style.visuals.light_dark_small_toggle_button(ui);
+        if let Some(visuals) = new_visuals {
+            ui.ctx().set_visuals(visuals);
+        }
+    }
+
     pub struct Program {
         words: Words,
         settings: Settings,
@@ -652,6 +692,8 @@ mod gui {
         about_window: ClosableWindow<AboutWindow>,
         search_words_window: ClosableWindow<SearchWordsWindow>,
         edit_word_window: ClosableWindow<EditWordWindow>,
+        info_window: ClosableWindow<InfoWindow>,
+        synchronous_subtitles_window: ClosableWindow<SynchronousSubtitlesWindow>,
     }
 
     impl Program {
@@ -684,8 +726,9 @@ mod gui {
                 settings_window: Default::default(),
                 about_window: Default::default(),
                 search_words_window: Default::default(),
-
                 edit_word_window: Default::default(),
+                info_window: Default::default(),
+                synchronous_subtitles_window: Default::default(),
             };
 
             result.open_activity(today, working_time);
@@ -737,6 +780,7 @@ mod gui {
         pub fn ui(&mut self, ctx: &CtxRef, today: Day, working_time: &mut f64) {
             TopBottomPanel::top("top").show(ctx, |ui| {
                 menu::bar(ui, |ui| {
+                    dark_light_mode_switch(ui);
                     menu::menu(ui, "Data", |ui| {
                         if ui.button("Export to clipboard").clicked() {
                             write_clipboard(&self.save_to_string(today, *working_time));
@@ -754,6 +798,11 @@ mod gui {
                         }
                         if ui.button("Manually").clicked() {
                             self.add_custom_words_window = ClosableWindow::new(Default::default());
+                        }
+                        ui.separator();
+                        if ui.button("Synchronous subtitles").clicked() {
+                            self.synchronous_subtitles_window =
+                                ClosableWindow::new(SynchronousSubtitlesWindow::new());
                         }
                     });
                     if ui.button("Search").clicked() {
@@ -882,16 +931,29 @@ mod gui {
             }
 
             let window = &mut self.load_text_window;
-            let known_words = &self.known_words;
+            let words = &self.words;
             let add_words_window = &mut self.add_words_window;
+            let info_window = &mut self.info_window;
             window.ui(ctx, |t, ui| {
-                if let Some(words) = t.ui(ui, known_words) {
+                if let Some((words, stats)) = t.ui(ui, words) {
                     if !words.words_with_context.0.is_empty() {
                         *add_words_window = ClosableWindow::new(AddWordsWindow::new(
                             words.text,
                             words.words_with_context,
                         ));
                     }
+                    *info_window = ClosableWindow::new(InfoWindow(vec![
+                        "Info about words count in this text.".to_string(),
+                        format!("Total: {}", words.words_count),
+                        format!("Unique: {}", words.unique_words_count),
+                        format!(
+                            "Filtered: {}",
+                            stats.filtered_known + stats.filtered_learned
+                        ),
+                        format!("   Known: {}", stats.filtered_known),
+                        format!("   Learning: {}", stats.filtered_learned),
+                        format!("Unknown: {}", stats.unknown_words),
+                    ]));
                     true
                 } else {
                     false
@@ -931,9 +993,12 @@ mod gui {
             let words = &mut self.words;
             let stats = &mut self.stats;
             let search_words_window = &mut self.search_words_window;
+            let synchronous_subtitles_window = &mut self.synchronous_subtitles_window;
             let mut save = false;
             let closed = window.ui(ctx, |t, ui| {
-                if let Some((word, to_add, close)) = t.ui(ui, search_words_window, words) {
+                if let Some((word, to_add, close)) =
+                    t.ui(ui, search_words_window, synchronous_subtitles_window, words)
+                {
                     words.add_word(word, to_add, today, stats.by_day.entry(today).or_default());
                     save = true;
                     close
@@ -988,6 +1053,16 @@ mod gui {
             });
 
             self.about_window.ui(ctx, |t, ui| {
+                t.ui(ui);
+                false
+            });
+
+            self.info_window.ui(ctx, |t, ui| {
+                t.ui(ui);
+                false
+            });
+
+            self.synchronous_subtitles_window.ui(ctx, |t, ui| {
                 t.ui(ui);
                 false
             });
@@ -1065,6 +1140,13 @@ mod gui {
         }
     }
 
+    #[derive(Default)]
+    struct LoadTextStats {
+        filtered_known: usize,
+        filtered_learned: usize,
+        unknown_words: usize,
+    }
+
     impl LoadTextWindow {
         fn new(load_subtitles: bool) -> Self {
             Self {
@@ -1074,14 +1156,14 @@ mod gui {
             }
         }
 
-        fn ui(&mut self, ui: &mut Ui, known_words: &BTreeSet<String>) -> Option<GetWordsResult> {
+        fn ui(&mut self, ui: &mut Ui, data: &Words) -> Option<(GetWordsResult, LoadTextStats)> {
             let mut action = None;
             ui.horizontal(|ui| {
                 if ui.button("Use this text").clicked() {
                     let text = &self.text;
 
                     let words = if self.load_subtitles {
-                        match get_words_subtitles(&text) {
+                        match get_words_subtitles(text) {
                             Ok(words) => Some(words),
                             Err(error) => {
                                 self.subtitles_error = Some(format!("{:#?}", error));
@@ -1089,14 +1171,31 @@ mod gui {
                             }
                         }
                     } else {
-                        Some(get_words(&text))
+                        Some(get_words(text))
                     };
                     if let Some(mut words) = words {
+                        let mut stats = LoadTextStats::default();
                         words
                             .words_with_context
                             .0
-                            .retain(|x| !known_words.contains(&x.0));
-                        action = Some(words);
+                            .retain(|x| match data.0.get(&x.0) {
+                                Some(x)
+                                    if x.iter()
+                                        .any(|x| matches!(x, WordStatus::ToLearn { .. })) =>
+                                {
+                                    stats.filtered_learned += 1;
+                                    false
+                                }
+                                Some(_) => {
+                                    stats.filtered_known += 1;
+                                    false
+                                }
+                                None => {
+                                    stats.unknown_words += 1;
+                                    true
+                                }
+                            });
+                        action = Some((words, stats));
                     }
                 }
             });
@@ -1247,6 +1346,25 @@ mod gui {
                 }
             } else {
                 settings.use_keyboard_layout = false;
+            }
+        }
+    }
+
+    struct InfoWindow(Vec<String>);
+
+    impl WindowTrait for InfoWindow {
+        fn create_window(&self) -> Window<'static> {
+            Window::new("Info")
+                .scroll(false)
+                .fixed_size((200., 50.))
+                .collapsible(false)
+        }
+    }
+
+    impl InfoWindow {
+        fn ui(&mut self, ui: &mut Ui) {
+            for i in &self.0 {
+                ui.label(i);
             }
         }
     }
@@ -1498,7 +1616,7 @@ mod gui {
         fn create_window(&self) -> Window<'static> {
             Window::new("Add words")
                 .scroll(false)
-                .fixed_size((200., 200.))
+                .fixed_size((200., 400.))
                 .collapsible(false)
         }
     }
@@ -1516,6 +1634,7 @@ mod gui {
             &mut self,
             ui: &mut Ui,
             search_words_window: &mut ClosableWindow<SearchWordsWindow>,
+            synchronous_subtitles_window: &mut ClosableWindow<SynchronousSubtitlesWindow>,
             words: &Words,
         ) -> Option<(String, WordsToAdd, bool)> {
             let mut action = None;
@@ -1526,7 +1645,23 @@ mod gui {
                 self.words.0[0].0.clone(),
                 words,
             );
+            SynchronousSubtitlesWindow::change_search_string(
+                &mut synchronous_subtitles_window.0,
+                self.words.0[0].0.clone(),
+                true,
+            );
             ui.separator();
+            if let Some((word, to_add)) =
+                word_to_add(ui, &mut self.words.0[0].0, &mut self.translations)
+            {
+                self.translations.clear();
+                self.words.0.remove(0);
+                action = Some((word, to_add, self.words.0.is_empty()));
+            }
+            ui.separator();
+            if self.words.0.is_empty() {
+                return action;
+            }
             ScrollArea::from_max_height(200.0).show(ui, |ui| {
                 const CONTEXT_SIZE: usize = 50;
                 for range in &self.words.0[0].1 {
@@ -1551,14 +1686,6 @@ mod gui {
                     ui.separator();
                 }
             });
-            ui.separator();
-            if let Some((word, to_add)) =
-                word_to_add(ui, &mut self.words.0[0].0, &mut self.translations)
-            {
-                self.translations.clear();
-                self.words.0.remove(0);
-                action = Some((word, to_add, self.words.0.is_empty()));
-            }
             action
         }
     }
@@ -1646,34 +1773,436 @@ mod gui {
         fn ui(&mut self, ui: &mut Ui) {
             ui.checkbox(&mut self.stackplot, "Stackplot");
             use egui::plot::*;
-            let lines: Vec<_> = (0..self.values.values().next().unwrap().len())
-                .map(|i| {
-                    Line::new(Values::from_values(
-                        self.values
-                            .iter()
-                            .map(|(day, arr)| {
-                                Value::new(
-                                    day.0 as f64,
-                                    if self.stackplot {
-                                        arr.iter().take(i + 1).sum::<f64>()
-                                    } else {
-                                        arr[i]
-                                    },
-                                )
-                            })
-                            .collect(),
-                    ))
-                })
-                .collect();
+            let lines = (0..self.values.values().next().unwrap().len()).map(|i| {
+                Line::new(Values::from_values(
+                    self.values
+                        .iter()
+                        .map(|(day, arr)| {
+                            Value::new(
+                                day.0 as f64,
+                                if self.stackplot {
+                                    arr.iter().take(i + 1).sum::<f64>()
+                                } else {
+                                    arr[i]
+                                },
+                            )
+                        })
+                        .collect(),
+                ))
+            });
 
             let mut plot = Plot::new("percentage")
                 .allow_zoom(false)
                 .allow_drag(false)
                 .legend(Legend::default().position(Corner::LeftTop));
-            for (line, name) in lines.into_iter().zip(self.names.iter()) {
+            for (line, name) in lines.zip(self.names.iter()) {
                 plot = plot.line(line.name(name));
             }
             ui.add(plot);
+        }
+    }
+
+    enum SynchronousSubtitlesWindow {
+        Load {
+            lang1: String,
+            lang2: String,
+            error1: Option<String>,
+            error2: Option<String>,
+        },
+        View {
+            search_string: String,
+            whole_words_search: bool,
+            found: Vec<usize>,
+            position: usize,
+            phrases: Vec<(Option<String>, Option<String>)>,
+            update_scroll: bool,
+        },
+    }
+
+    impl WindowTrait for SynchronousSubtitlesWindow {
+        fn create_window(&self) -> Window<'static> {
+            if matches!(self, SynchronousSubtitlesWindow::Load { .. }) {
+                Window::new("Load synchronous subtitles")
+                    .scroll(true)
+                    .fixed_size((300., 200.))
+                    .collapsible(false)
+            } else {
+                Window::new("View synchronous subtitles")
+                    .scroll(false)
+                    .fixed_size((400., 200.))
+                    .collapsible(false)
+            }
+        }
+    }
+
+    impl SynchronousSubtitlesWindow {
+        fn new() -> Self {
+            Self::Load {
+                lang1: String::new(),
+                lang2: String::new(),
+                error1: None,
+                error2: None,
+            }
+        }
+
+        fn calc_phrases(
+            sub1: Vec<srtparse::Item>,
+            sub2: Vec<srtparse::Item>,
+        ) -> Vec<(Option<String>, Option<String>)> {
+            use std::ops::RangeInclusive;
+
+            fn convert_time(time: srtparse::Time) -> u64 {
+                time.milliseconds + 1000 * (time.seconds + 60 * (time.minutes + 60 * time.hours))
+            }
+
+            fn convert(item: srtparse::Item) -> (RangeInclusive<u64>, String, bool) {
+                let start = convert_time(item.start_time);
+                let end = convert_time(item.end_time);
+                (start..=end, item.text, false) // false means 'used'
+            }
+
+            let mut sub1: Vec<_> = sub1.into_iter().map(convert).collect();
+            let mut sub2: Vec<_> = sub2.into_iter().map(convert).collect();
+            let mut result = Vec::new();
+
+            let end_times = {
+                let mut result = sub1
+                    .iter()
+                    .enumerate()
+                    .map(|(pos, x)| (pos, *x.0.end(), false))
+                    .chain(
+                        sub2.iter()
+                            .enumerate()
+                            .map(|(pos, x)| (pos, *x.0.end(), true)),
+                    )
+                    .collect::<Vec<_>>();
+                result.sort_by_key(|x| x.1);
+                result
+            };
+
+            for (pos, end, is_second) in end_times {
+                #[rustfmt::skip]
+                macro_rules! current { () => { if is_second { &mut sub2 } else { &mut sub1 } }; }
+                #[rustfmt::skip]
+                macro_rules! other { () => { if is_second { &mut sub1 } else { &mut sub2 } }; }
+                if !current!()[pos].2 {
+                    if let Some(pos1) = other!().iter().position(|x| x.0.contains(&end) && !x.2) {
+                        current!()[pos].2 = true;
+                        other!()[pos1].2 = true;
+                        if is_second {
+                            result.push((Some(sub1[pos1].1.clone()), Some(sub2[pos].1.clone())));
+                        } else {
+                            result.push((Some(sub1[pos].1.clone()), Some(sub2[pos1].1.clone())));
+                        }
+                    } else {
+                        current!()[pos].2 = true;
+                        if is_second {
+                            result.push((None, Some(sub2[pos].1.clone())));
+                        } else {
+                            result.push((Some(sub1[pos].1.clone()), None));
+                        }
+                    }
+                }
+            }
+
+            result
+        }
+
+        fn change_search_string(
+            this: &mut Option<Self>,
+            search_string1: String,
+            whole_words_search1: bool,
+        ) {
+            use SynchronousSubtitlesWindow::*;
+            if let Some(this) = this {
+                let update = if let View {
+                    search_string,
+                    whole_words_search,
+                    ..
+                } = this
+                {
+                    if *search_string != search_string1 {
+                        *search_string = search_string1;
+                        *whole_words_search = whole_words_search1;
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if update {
+                    this.update();
+                    if let View {
+                        position,
+                        found,
+                        update_scroll,
+                        ..
+                    } = this
+                    {
+                        if found.len() > 1 {
+                            *position = 1;
+                            *update_scroll = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        fn find_whole_word_bool(text: &str, word: &str) -> bool {
+            let word = word.chars().collect::<Vec<_>>();
+            #[derive(Clone)]
+            enum State {
+                NotAlphabetic,
+                SkipCurrentWord,
+                Check(usize),
+            }
+            use State::*;
+            let mut state = NotAlphabetic;
+            for c in text.chars().chain(std::iter::once('.')) {
+                loop {
+                    let mut to_break = true;
+                    match state.clone() {
+                        NotAlphabetic => {
+                            if is_word_symbol(c) {
+                                state = Check(0);
+                                to_break = false;
+                            } else {
+                                // do nothing
+                            }
+                        }
+                        SkipCurrentWord => {
+                            if is_word_symbol(c) {
+                                // do nothing
+                            } else {
+                                state = NotAlphabetic;
+                            }
+                        }
+                        Check(pos) => {
+                            if is_word_symbol(c) {
+                                #[allow(clippy::collapsible_else_if)]
+                                if pos == word.len() {
+                                    state = SkipCurrentWord;
+                                } else {
+                                    if c == word[pos] {
+                                        state = Check(pos + 1);
+                                    } else {
+                                        state = SkipCurrentWord;
+                                    }
+                                }
+                            } else {
+                                if pos == word.len() {
+                                    return true;
+                                }
+                                state = NotAlphabetic;
+                            }
+                        }
+                    }
+                    if to_break {
+                        break;
+                    }
+                }
+            }
+            false
+        }
+
+        fn find_occurence_bool(text: &str, occurence: &str) -> bool {
+            text.contains(occurence)
+        }
+
+        fn update(&mut self) {
+            use SynchronousSubtitlesWindow::*;
+            if let View {
+                search_string,
+                whole_words_search,
+                found,
+                position,
+                phrases,
+                update_scroll,
+            } = self
+            {
+                *position = 0;
+                found.clear();
+                found.push(0);
+                if !search_string.is_empty() {
+                    for (pos, text) in phrases
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(pos, x)| Some((pos, x.0.as_ref()?)))
+                    {
+                        let find_result = if *whole_words_search {
+                            Self::find_whole_word_bool(text, search_string)
+                        } else {
+                            Self::find_occurence_bool(text, search_string)
+                        };
+
+                        if find_result {
+                            found.push(pos);
+                        }
+                    }
+                }
+                *update_scroll = true;
+                if found.len() > 1 {
+                    *position = 1;
+                }
+            }
+        }
+
+        fn ui(&mut self, ui: &mut Ui) {
+            use SynchronousSubtitlesWindow::*;
+            let mut update = None;
+            let mut update_search = false;
+            match self {
+                Load {
+                    lang1,
+                    lang2,
+                    error1,
+                    error2,
+                } => {
+                    if ui.button("Use these subtitles").clicked() {
+                        let sub1 = match srtparse::from_str(&lang1) {
+                            Ok(sub1) => Some(sub1),
+                            Err(err) => {
+                                *error1 = Some(format!("{:#?}", err));
+                                None
+                            }
+                        };
+                        let sub2 = match srtparse::from_str(&lang2) {
+                            Ok(sub2) => Some(sub2),
+                            Err(err) => {
+                                *error2 = Some(format!("{:#?}", err));
+                                None
+                            }
+                        };
+                        update = sub1.zip(sub2);
+                    }
+                    if error1.is_some() || error2.is_some() {
+                        ui.separator();
+                        if let Some(error1) = error1 {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing.x = 0.;
+                                ui.add(
+                                    Label::new("Left Error: ")
+                                        .text_color(Color32::RED)
+                                        .monospace(),
+                                );
+                                ui.monospace(&**error1);
+                            });
+                        }
+                        if let Some(error2) = error2 {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing.x = 0.;
+                                ui.add(
+                                    Label::new("Right Error: ")
+                                        .text_color(Color32::RED)
+                                        .monospace(),
+                                );
+                                ui.monospace(&**error2);
+                            });
+                        }
+                    }
+                    ui.separator();
+                    ui.columns(2, |cols| {
+                        cols[0].text_edit_multiline(lang1);
+                        cols[1].text_edit_multiline(lang2);
+                    });
+                }
+                View {
+                    search_string,
+                    whole_words_search,
+                    found,
+                    position,
+                    phrases,
+                    update_scroll: update_scroll_origin,
+                } => {
+                    let mut update_scroll = *update_scroll_origin;
+                    *update_scroll_origin = false;
+                    if ui
+                        .add(
+                            TextEdit::singleline(search_string)
+                                .hint_text("Type here to find word..."),
+                        )
+                        .changed()
+                    {
+                        update_search = true;
+                    }
+                    ui.horizontal(|ui| {
+                        if ui
+                            .checkbox(whole_words_search, "Search by whole words")
+                            .changed()
+                        {
+                            update_search = true;
+                        }
+                        ui.separator();
+                        if ui.add(Button::new("◀").enabled(*position > 1)).clicked() {
+                            *position -= 1;
+                            update_scroll = true;
+                        }
+                        ui.monospace(format!("{:3}", *position));
+                        if ui
+                            .add(Button::new("▶").enabled(*position + 1 < found.len()))
+                            .clicked()
+                        {
+                            *position += 1;
+                            update_scroll = true;
+                        }
+                        ui.label(format!("/{}", found.len() - 1));
+                    });
+                    ui.separator();
+                    ScrollArea::from_max_height(200.0).show(ui, |ui| {
+                        Grid::new("view_grid")
+                            .spacing([4.0, 4.0])
+                            .max_col_width(150.)
+                            .striped(true)
+                            .show(ui, |ui| {
+                                for (pos, (a, b)) in phrases.iter().enumerate() {
+                                    ui.label(format!("{}", pos + 1));
+                                    if !found.is_empty() && found[*position] == pos {
+                                        let response = if let Some(text) = a {
+                                            if *position == 0 {
+                                                ui.label(text)
+                                            } else {
+                                                ui.add(Label::new(&text).strong())
+                                            }
+                                        } else {
+                                            ui.label("-")
+                                        };
+                                        if update_scroll {
+                                            response.scroll_to_me(Align::Center);
+                                        }
+                                    } else {
+                                        if let Some(text) = a {
+                                            ui.label(text);
+                                        } else {
+                                            ui.label("-");
+                                        }
+                                    }
+                                    if let Some(text) = b {
+                                        ui.label(text);
+                                    } else {
+                                        ui.label("-");
+                                    }
+                                    ui.end_row();
+                                }
+                            });
+                    });
+                }
+            }
+            if update_search {
+                self.update();
+            }
+            if let Some((sub1, sub2)) = update {
+                let phrases = Self::calc_phrases(sub1, sub2);
+                *self = View {
+                    search_string: String::new(),
+                    whole_words_search: false,
+                    found: vec![0],
+                    position: 0,
+                    phrases,
+                    update_scroll: false,
+                };
+                self.update();
+            }
         }
     }
 
@@ -2012,8 +2541,9 @@ mod gui {
 
     // Это окно нельзя закрыть
     struct LearnWordsWindow {
-        /// То что надо ввести несколько раз повторяется, слово повторяется максимальное число из всех под-слов что с ним связано. Если слово уже известно, то надо
-        to_type_all: Vec<String>,
+        to_type_repeat: Vec<String>,
+        to_type_new: Vec<String>,
+
         to_type_today: Option<Vec<String>>,
         current: LearnWords,
     }
@@ -2021,8 +2551,10 @@ mod gui {
     enum LearnWords {
         None,
         Choose {
-            all_count: usize,
-            n: usize,
+            all_repeat: usize,
+            all_new: usize,
+            n_repeat: usize,
+            n_new: usize,
         },
         Typing {
             word: String,
@@ -2044,7 +2576,9 @@ mod gui {
     impl LearnWordsWindow {
         fn new(words: &Words, today: Day, type_count: &[LearnType]) -> Self {
             let mut result = Self {
-                to_type_all: Vec::new(),
+                to_type_repeat: Vec::new(),
+                to_type_new: Vec::new(),
+
                 to_type_today: None,
                 current: LearnWords::None,
             };
@@ -2054,7 +2588,7 @@ mod gui {
 
         fn pick_current_type(&mut self, words: &Words, today: Day, type_count: &[LearnType]) {
             loop {
-                if self.to_type_all.is_empty() {
+                if self.to_type_repeat.is_empty() && self.to_type_new.is_empty() {
                     self.current = LearnWords::None;
                     return;
                 }
@@ -2097,8 +2631,10 @@ mod gui {
                     }
                 } else {
                     self.current = LearnWords::Choose {
-                        all_count: self.to_type_all.len(),
-                        n: 20,
+                        all_repeat: self.to_type_repeat.len(),
+                        all_new: self.to_type_new.len(),
+                        n_repeat: 30,
+                        n_new: 15,
                     };
                     return;
                 }
@@ -2106,7 +2642,9 @@ mod gui {
         }
 
         fn update(&mut self, words: &Words, today: Day, type_count: &[LearnType]) {
-            self.to_type_all = words.get_words_to_learn_today(today, type_count);
+            let (repeat, new) = words.get_words_to_learn_today(today, type_count);
+            self.to_type_repeat = repeat;
+            self.to_type_new = new;
             self.pick_current_type(words, today, type_count);
         }
 
@@ -2127,25 +2665,46 @@ mod gui {
                     LearnWords::None => {
                         ui.label("🎉🎉🎉 Everything is learned for today! 🎉🎉🎉");
                     }
-                    LearnWords::Choose { all_count, n } => {
-                        ui.label(format!("Count of words to type today is {}", all_count));
+                    LearnWords::Choose {
+                        all_repeat,
+                        all_new,
+                        n_repeat,
+                        n_new,
+                    } => {
+                        ui.label("Choose words to work with now.");
                         ui.horizontal(|ui| {
-                            ui.label("Choose count to type now: ");
+                            ui.label("Old words to repeat: ");
                             ui.add(
-                                egui::DragValue::new(n)
-                                    .clamp_range(1..=*all_count)
+                                egui::DragValue::new(n_repeat)
+                                    .clamp_range(0..=*all_repeat)
                                     .speed(1.0),
                             );
+                            ui.label(format!("/{}", all_repeat))
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("New words to learn: ");
+                            ui.add(
+                                egui::DragValue::new(n_new)
+                                    .clamp_range(0..=*all_new)
+                                    .speed(1.0),
+                            );
+                            ui.label(format!("/{}", all_new))
                         });
                         if ui.button("Choose").clicked() {
+                            let to_type_repeat = &mut self.to_type_repeat;
+                            let to_type_new = &mut self.to_type_new;
                             self.to_type_today = Some(
-                                (0..*n)
+                                (0..*n_repeat)
                                     .map(|_| {
-                                        self.to_type_all.remove(
-                                            macroquad::rand::rand() as usize
-                                                % self.to_type_all.len(),
+                                        to_type_repeat.remove(
+                                            macroquad::rand::rand() as usize % to_type_repeat.len(),
                                         )
                                     })
+                                    .chain((0..*n_new).map(|_| {
+                                        to_type_new.remove(
+                                            macroquad::rand::rand() as usize % to_type_new.len(),
+                                        )
+                                    }))
                                     .collect(),
                             );
                             self.pick_current_type(words, today, &settings.type_count);
@@ -2172,8 +2731,10 @@ mod gui {
                         if let Some(word_by_hint) = word_by_hint {
                             ui.label("Word:");
 
-                            let response =
-                                ui.add(egui::TextEdit::singleline(word_by_hint).hint_text(&word));
+                            let response = ui.add(
+                                egui::TextEdit::singleline(word_by_hint)
+                                    .hint_text(format!(" {}", word)),
+                            );
 
                             enabled = word_by_hint == word;
 
