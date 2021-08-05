@@ -1,6 +1,6 @@
 [package]
 name = "learn_words"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -15,6 +15,8 @@ srtparse = "0.2.0"
 chrono = "0.4.19"
 quad-storage = "0.1.2"
 strsim = "0.10.0"
+rand = "0.7"
+rand_pcg = "0.2"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 color-backtrace = "0.5.0"

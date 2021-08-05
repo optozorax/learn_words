@@ -1,9 +1,12 @@
 #![allow(clippy::collapsible_else_if)]
 
+use ::rand::prelude::*;
 use macroquad::prelude::*;
 use serde::*;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+
+type Rand = rand_pcg::Pcg64;
 
 macro_rules! err {
     () => {
@@ -629,10 +632,6 @@ impl Settings {
     }
 }
 
-fn write_clipboard(s: &str) {
-    miniquad::clipboard::set(unsafe { get_internal_gl().quad_context }, s)
-}
-
 #[derive(Serialize, Deserialize, Clone, Debug, Ord, PartialOrd, Eq, PartialEq)]
 pub enum WordType {
     Known,
@@ -711,6 +710,7 @@ mod gui {
         github_activity_window: ClosableWindow<GithubActivityWindow>,
 
         import_window: ClosableWindow<ImportWindow>,
+        export_window: ClosableWindow<ExportWindow>,
         settings_window: ClosableWindow<SettingsWindow>,
         about_window: ClosableWindow<AboutWindow>,
         search_words_window: ClosableWindow<SearchWordsWindow>,
@@ -726,8 +726,9 @@ mod gui {
             stats: Statistics,
             today: Day,
             working_time: f64,
+            rng: &mut Rand,
         ) -> Self {
-            let learn_window = LearnWordsWindow::new(&words, today, &settings.type_count);
+            let learn_window = LearnWordsWindow::new(&words, today, &settings.type_count, rng);
             let known_words = words.calculate_known_words();
 
             let mut result = Self {
@@ -746,6 +747,7 @@ mod gui {
                 github_activity_window: Default::default(),
 
                 import_window: Default::default(),
+                export_window: Default::default(),
                 settings_window: Default::default(),
                 about_window: Default::default(),
                 search_words_window: Default::default(),
@@ -800,12 +802,14 @@ mod gui {
                 ClosableWindow::new(GithubActivityWindow::new(&self.stats, today));
         }
 
-        pub fn ui(&mut self, ctx: &CtxRef, today: Day, working_time: &mut f64) {
+        pub fn ui(&mut self, ctx: &CtxRef, today: Day, working_time: &mut f64, rng: &mut Rand) {
             TopBottomPanel::top("top").show(ctx, |ui| {
                 menu::bar(ui, |ui| {
                     menu::menu(ui, "Data", |ui| {
-                        if ui.button("Export to clipboard").clicked() {
-                            write_clipboard(&self.save_to_string(today, *working_time));
+                        if ui.button("Export").clicked() {
+                            self.export_window = ClosableWindow::new(ExportWindow::new(
+                                self.save_to_string(today, *working_time),
+                            ));
                         }
                         if ui.button("Import").clicked() {
                             self.import_window = ClosableWindow::new(ImportWindow::new());
@@ -834,6 +838,12 @@ mod gui {
                     menu::menu(ui, "Statistics", |ui| {
                         if ui.button("Full").clicked() {
                             self.full_stats_window = ClosableWindow::new(FullStatsWindow {
+                                time: self
+                                    .stats
+                                    .by_day
+                                    .values()
+                                    .map(|x| x.working_time)
+                                    .sum::<f64>(),
                                 attempts: self.words.calculate_attempts_statistics(),
                                 word_count_by_level: self.words.calculate_word_statistics(),
                             });
@@ -950,6 +960,7 @@ mod gui {
                 &mut self.stats.by_day.entry(today).or_default(),
                 &self.settings,
                 &mut save,
+                rng,
             );
             if save {
                 self.save(today, *working_time);
@@ -1004,7 +1015,7 @@ mod gui {
             });
             if closed {
                 self.learn_window
-                    .update(&self.words, today, &self.settings.type_count);
+                    .update(&self.words, today, &self.settings.type_count, rng);
             }
 
             let window = &mut self.settings_window;
@@ -1033,7 +1044,7 @@ mod gui {
             });
             if closed {
                 self.learn_window
-                    .update(&self.words, today, &self.settings.type_count);
+                    .update(&self.words, today, &self.settings.type_count, rng);
                 self.known_words = self.words.calculate_known_words();
                 self.save(today, *working_time);
             }
@@ -1054,7 +1065,7 @@ mod gui {
             });
             if closed {
                 self.learn_window
-                    .update(&self.words, today, &self.settings.type_count);
+                    .update(&self.words, today, &self.settings.type_count, rng);
                 self.known_words = self.words.calculate_known_words();
                 self.save(today, *working_time);
             }
@@ -1084,6 +1095,11 @@ mod gui {
             });
 
             self.info_window.ui(ctx, |t, ui| {
+                t.ui(ui);
+                false
+            });
+
+            self.export_window.ui(ctx, |t, ui| {
                 t.ui(ui);
                 false
             });
@@ -1236,6 +1252,30 @@ mod gui {
             ui.separator();
             ui.text_edit_multiline(&mut self.text);
             action
+        }
+    }
+
+    struct ExportWindow {
+        text: String,
+    }
+
+    impl WindowTrait for ExportWindow {
+        fn create_window(&self) -> Window<'static> {
+            Window::new("Export data")
+                .scroll(true)
+                .fixed_size((200., 200.))
+                .collapsible(false)
+        }
+    }
+
+    impl ExportWindow {
+        fn new(text: String) -> Self {
+            Self { text }
+        }
+
+        fn ui(&mut self, ui: &mut Ui) {
+            ui.label("Copy from this field: Ctrl+A, Ctrl+V.");
+            ui.text_edit_multiline(&mut self.text);
         }
     }
 
@@ -1442,7 +1482,7 @@ mod gui {
         fn create_window(&self) -> Window<'static> {
             Window::new("About")
                 .scroll(false)
-                .fixed_size((300., 100.))
+                .fixed_size((320., 100.))
                 .collapsible(false)
         }
     }
@@ -1456,7 +1496,7 @@ mod gui {
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 0.;
                 ui.add(egui::Label::new("Version: ").strong());
-                ui.label("0.1.0");
+                ui.label("0.2.0");
             });
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 0.;
@@ -1794,6 +1834,7 @@ mod gui {
 
     #[derive(Default)]
     struct FullStatsWindow {
+        time: f64,
         attempts: TypingStats,
         word_count_by_level: BTreeMap<WordType, u64>,
     }
@@ -1809,6 +1850,8 @@ mod gui {
 
     impl FullStatsWindow {
         fn ui(&mut self, ui: &mut Ui) {
+            ui.label(format!("Full working time: {}", print_time(self.time)));
+            ui.separator();
             ui.label(format!(
                 "Attempts: {}",
                 self.attempts.right + self.attempts.wrong,
@@ -2077,7 +2120,8 @@ mod gui {
                                 if pos == word.len() {
                                     state = SkipCurrentWord;
                                 } else {
-                                    if c == word[pos] {
+                                    // todo сделать нормально
+                                    if c.to_lowercase().next().unwrap() == word[pos] {
                                         state = Check(pos + 1);
                                     } else {
                                         state = SkipCurrentWord;
@@ -2670,7 +2714,7 @@ mod gui {
     }
 
     impl LearnWordsWindow {
-        fn new(words: &Words, today: Day, type_count: &[LearnType]) -> Self {
+        fn new(words: &Words, today: Day, type_count: &[LearnType], rng: &mut Rand) -> Self {
             let mut result = Self {
                 to_type_repeat: Vec::new(),
                 to_type_new: Vec::new(),
@@ -2678,11 +2722,17 @@ mod gui {
                 to_type_today: None,
                 current: LearnWords::None,
             };
-            result.update(words, today, type_count);
+            result.update(words, today, type_count, rng);
             result
         }
 
-        fn pick_current_type(&mut self, words: &Words, today: Day, type_count: &[LearnType]) {
+        fn pick_current_type(
+            &mut self,
+            words: &Words,
+            today: Day,
+            type_count: &[LearnType],
+            rng: &mut Rand,
+        ) {
             loop {
                 if self.to_type_repeat.is_empty() && self.to_type_new.is_empty() {
                     self.current = LearnWords::None;
@@ -2699,7 +2749,7 @@ mod gui {
                 }
 
                 if let Some(to_type_today) = &mut self.to_type_today {
-                    let position = macroquad::rand::rand() as usize % to_type_today.len();
+                    let position = rng.gen_range(0, to_type_today.len());
                     let word = &to_type_today[position];
                     if !words.is_learned(word) {
                         let result = words.get_word_to_learn(word, today, type_count);
@@ -2737,13 +2787,14 @@ mod gui {
             }
         }
 
-        fn update(&mut self, words: &Words, today: Day, type_count: &[LearnType]) {
+        fn update(&mut self, words: &Words, today: Day, type_count: &[LearnType], rng: &mut Rand) {
             let (repeat, new) = words.get_words_to_learn_today(today, type_count);
             self.to_type_repeat = repeat;
             self.to_type_new = new;
-            self.pick_current_type(words, today, type_count);
+            self.pick_current_type(words, today, type_count, rng);
         }
 
+        #[allow(clippy::too_many_arguments)]
         fn ui(
             &mut self,
             ctx: &CtxRef,
@@ -2752,6 +2803,7 @@ mod gui {
             day_stats: &mut DayStatistics,
             settings: &Settings,
             save: &mut bool,
+            rng: &mut Rand,
         ) {
             egui::Window::new("Learn words")
                 .fixed_size((300., 100.))
@@ -2789,21 +2841,20 @@ mod gui {
                         if ui.button("Choose").clicked() {
                             let to_type_repeat = &mut self.to_type_repeat;
                             let to_type_new = &mut self.to_type_new;
-                            self.to_type_today = Some(
-                                (0..*n_repeat)
+
+                            self.to_type_today = Some({
+                                let mut result: Vec<_> = (0..*n_repeat)
                                     .map(|_| {
-                                        to_type_repeat.remove(
-                                            macroquad::rand::rand() as usize % to_type_repeat.len(),
-                                        )
+                                        to_type_repeat
+                                            .remove(rng.gen_range(0, to_type_repeat.len()))
                                     })
-                                    .chain((0..*n_new).map(|_| {
-                                        to_type_new.remove(
-                                            macroquad::rand::rand() as usize % to_type_new.len(),
-                                        )
-                                    }))
-                                    .collect(),
-                            );
-                            self.pick_current_type(words, today, &settings.type_count);
+                                    .collect();
+                                result.extend((0..*n_new).map(|_| {
+                                    to_type_new.remove(rng.gen_range(0, to_type_new.len()))
+                                }));
+                                result
+                            });
+                            self.pick_current_type(words, today, &settings.type_count, rng);
                         }
                     }
                     LearnWords::Typing {
@@ -3028,7 +3079,7 @@ mod gui {
                             *gain_focus = false;
                         }
                         if response.clicked() {
-                            self.pick_current_type(words, today, &settings.type_count);
+                            self.pick_current_type(words, today, &settings.type_count, rng);
                             *save = true;
                         }
                     }
@@ -3359,6 +3410,8 @@ async fn main() {
     }
     let today = current_day();
 
+    let mut rng = Rand::seed_from_u64(miniquad::date::now() as u64);
+
     #[cfg(not(target_arch = "wasm32"))]
     color_backtrace::install();
 
@@ -3380,6 +3433,7 @@ async fn main() {
         stats,
         today,
         *pause_detector.get_working_time(),
+        &mut rng,
     );
 
     let texture = Texture2D::from_rgba8(1, 1, &[192, 192, 192, 128]);
@@ -3393,7 +3447,7 @@ async fn main() {
         }
 
         egui_macroquad::ui(|ctx| {
-            program.ui(ctx, today, pause_detector.get_working_time());
+            program.ui(ctx, today, pause_detector.get_working_time(), &mut rng);
         });
         egui_macroquad::draw();
 
