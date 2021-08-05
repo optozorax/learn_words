@@ -515,6 +515,9 @@ pub struct Settings {
     time_to_pause: f64,
     use_keyboard_layout: bool,
     keyboard_layout: KeyboardLayout,
+    dpi: f32,
+    #[serde(default)]
+    white_theme: bool,
 }
 
 #[derive(Default, Serialize, Deserialize, Clone, Debug)]
@@ -594,6 +597,34 @@ impl Default for Settings {
             time_to_pause: 15.,
             use_keyboard_layout: false,
             keyboard_layout: Default::default(),
+            dpi: 1.0,
+            white_theme: false,
+        }
+    }
+}
+
+impl Settings {
+    fn color_github_high(&self) -> egui::Color32 {
+        if self.white_theme {
+            egui::Color32::from_rgb(60, 94, 61)
+        } else {
+            egui::Color32::GREEN
+        }
+    }
+
+    fn color_github_month(&self) -> egui::Color32 {
+        if self.white_theme {
+            egui::Color32::from_gray(160)
+        } else {
+            egui::Color32::WHITE
+        }
+    }
+
+    fn color_github_year(&self) -> egui::Color32 {
+        if self.white_theme {
+            egui::Color32::from_rgb(173, 118, 118)
+        } else {
+            egui::Color32::RED
         }
     }
 }
@@ -660,14 +691,6 @@ mod gui {
                 }
             }
             false
-        }
-    }
-
-    fn dark_light_mode_switch(ui: &mut egui::Ui) {
-        let style: egui::Style = (*ui.ctx().style()).clone();
-        let new_visuals = style.visuals.light_dark_small_toggle_button(ui);
-        if let Some(visuals) = new_visuals {
-            ui.ctx().set_visuals(visuals);
         }
     }
 
@@ -780,7 +803,6 @@ mod gui {
         pub fn ui(&mut self, ctx: &CtxRef, today: Day, working_time: &mut f64) {
             TopBottomPanel::top("top").show(ctx, |ui| {
                 menu::bar(ui, |ui| {
-                    dark_light_mode_switch(ui);
                     menu::menu(ui, "Data", |ui| {
                         if ui.button("Export to clipboard").clicked() {
                             write_clipboard(&self.save_to_string(today, *working_time));
@@ -844,6 +866,7 @@ mod gui {
                                         "Wrong attempts".to_string(),
                                     ],
                                     stackplot: false,
+                                    moving: false,
                                 });
                         }
                         if ui.button("Time by day").clicked() {
@@ -859,6 +882,7 @@ mod gui {
                                         .collect(),
                                     names: vec!["Working time".to_string()],
                                     stackplot: false,
+                                    moving: false,
                                 });
                         }
                         if ui.button("Words by day").clicked() {
@@ -904,6 +928,7 @@ mod gui {
                                         })
                                         .collect(),
                                     stackplot: false,
+                                    moving: false,
                                 });
                         }
                     });
@@ -1047,8 +1072,9 @@ mod gui {
                 false
             });
 
+            let settings = &self.settings;
             self.github_activity_window.ui(ctx, |t, ui| {
-                t.ui(ui);
+                t.ui(ui, settings);
                 false
             });
 
@@ -1294,6 +1320,29 @@ mod gui {
 
         fn ui(&mut self, ui: &mut Ui, settings: &mut Settings) {
             ui.horizontal(|ui| {
+                ui.label("Theme: ");
+                if !settings.white_theme {
+                    if ui
+                        .add(Button::new("☀").frame(false))
+                        .on_hover_text("Switch to light mode")
+                        .clicked()
+                    {
+                        settings.white_theme = !settings.white_theme;
+                        ui.ctx().set_visuals(Visuals::light());
+                    }
+                } else {
+                    if ui
+                        .add(Button::new("🌙").frame(false))
+                        .on_hover_text("Switch to dark mode")
+                        .clicked()
+                    {
+                        settings.white_theme = !settings.white_theme;
+                        ui.ctx().set_visuals(Visuals::dark());
+                    }
+                }
+            });
+
+            ui.horizontal(|ui| {
                 ui.label("Inaction time for pause: ");
                 ui.add(
                     egui::DragValue::new(&mut settings.time_to_pause)
@@ -1302,6 +1351,24 @@ mod gui {
                         .min_decimals(0)
                         .max_decimals(2),
                 );
+            });
+
+            ui.horizontal(|ui| {
+                let scale_factor = 1.05;
+                ui.label(format!("Scale: {:.2}", settings.dpi));
+                if ui
+                    .add(egui::widgets::Button::new(" + ").text_style(egui::TextStyle::Monospace))
+                    .clicked()
+                {
+                    settings.dpi *= scale_factor;
+                }
+                if ui
+                    .add(egui::widgets::Button::new(" - ").text_style(egui::TextStyle::Monospace))
+                    .clicked()
+                {
+                    settings.dpi /= scale_factor;
+                }
+                *user_dpi() = settings.dpi;
             });
 
             if !self.want_to_use_keyboard_layout && settings.use_keyboard_layout {
@@ -1616,7 +1683,7 @@ mod gui {
         fn create_window(&self) -> Window<'static> {
             Window::new("Add words")
                 .scroll(false)
-                .fixed_size((200., 400.))
+                .fixed_size((400., 400.))
                 .collapsible(false)
         }
     }
@@ -1637,56 +1704,63 @@ mod gui {
             synchronous_subtitles_window: &mut ClosableWindow<SynchronousSubtitlesWindow>,
             words: &Words,
         ) -> Option<(String, WordsToAdd, bool)> {
-            let mut action = None;
-            ui.label(format!("Words remains: {}", self.words.0.len()));
-            ui.label(format!("Occurences in text: {}", self.words.0[0].1.len()));
-            SearchWordsWindow::find_word(
-                &mut search_words_window.0,
-                self.words.0[0].0.clone(),
-                words,
-            );
-            SynchronousSubtitlesWindow::change_search_string(
-                &mut synchronous_subtitles_window.0,
-                self.words.0[0].0.clone(),
-                true,
-            );
-            ui.separator();
-            if let Some((word, to_add)) =
-                word_to_add(ui, &mut self.words.0[0].0, &mut self.translations)
-            {
-                self.translations.clear();
-                self.words.0.remove(0);
-                action = Some((word, to_add, self.words.0.is_empty()));
-            }
-            ui.separator();
-            if self.words.0.is_empty() {
-                return action;
-            }
-            ScrollArea::from_max_height(200.0).show(ui, |ui| {
-                const CONTEXT_SIZE: usize = 50;
-                for range in &self.words.0[0].1 {
-                    let start = range.start.saturating_sub(CONTEXT_SIZE);
-                    let end = {
-                        let result = range.end + CONTEXT_SIZE;
-                        if result > self.text.len() {
-                            self.text.len()
-                        } else {
-                            result
-                        }
-                    };
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing.x = 0.;
-                        ui.label("...");
-                        ui.label(&self.text[start..range.start]);
-                        ui.add(egui::Label::new(&self.text[range.clone()]).strong());
-                        ui.label(&self.text[range.end..end]);
-                        ui.label("...");
-                    });
-
-                    ui.separator();
+            ui.columns(2, |cols| {
+                let ui = &mut cols[0];
+                let mut action = None;
+                ui.label(format!("Words remains: {}", self.words.0.len()));
+                ui.label(format!("Occurences in text: {}", self.words.0[0].1.len()));
+                SearchWordsWindow::find_word(
+                    &mut search_words_window.0,
+                    self.words.0[0].0.clone(),
+                    words,
+                );
+                SynchronousSubtitlesWindow::change_search_string(
+                    &mut synchronous_subtitles_window.0,
+                    self.words.0[0].0.clone(),
+                    true,
+                );
+                ui.separator();
+                if let Some((word, to_add)) =
+                    word_to_add(ui, &mut self.words.0[0].0, &mut self.translations)
+                {
+                    self.translations.clear();
+                    self.words.0.remove(0);
+                    action = Some((word, to_add, self.words.0.is_empty()));
                 }
-            });
-            action
+
+                let ui = &mut cols[1];
+                ui.label("Context:");
+                ui.separator();
+                if self.words.0.is_empty() {
+                    return action;
+                }
+                ScrollArea::from_max_height(200.0).show(ui, |ui| {
+                    const CONTEXT_SIZE: usize = 50;
+                    for range in &self.words.0[0].1 {
+                        let start = range.start.saturating_sub(CONTEXT_SIZE);
+                        let end = {
+                            let result = range.end + CONTEXT_SIZE;
+                            if result > self.text.len() {
+                                self.text.len()
+                            } else {
+                                result
+                            }
+                        };
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing.x = 0.;
+                            ui.label("...");
+                            ui.label(&self.text[start..range.start]);
+                            ui.add(egui::Label::new(&self.text[range.clone()]).strong());
+                            ui.label(&self.text[range.end..end]);
+                            ui.label("...");
+                        });
+
+                        ui.separator();
+                    }
+                });
+
+                action
+            })
         }
     }
 
@@ -1761,6 +1835,7 @@ mod gui {
         values: BTreeMap<Day, Vec<f64>>,
         names: Vec<String>,
         stackplot: bool,
+        moving: bool,
     }
 
     impl WindowTrait for PercentageGraphWindow {
@@ -1771,33 +1846,51 @@ mod gui {
 
     impl PercentageGraphWindow {
         fn ui(&mut self, ui: &mut Ui) {
-            ui.checkbox(&mut self.stackplot, "Stackplot");
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut self.stackplot, "Stackplot");
+                ui.checkbox(&mut self.moving, "Enable moving");
+            });
             use egui::plot::*;
+            let mut max_value = 0.;
             let lines = (0..self.values.values().next().unwrap().len()).map(|i| {
                 Line::new(Values::from_values(
                     self.values
                         .iter()
                         .map(|(day, arr)| {
-                            Value::new(
-                                day.0 as f64,
-                                if self.stackplot {
-                                    arr.iter().take(i + 1).sum::<f64>()
-                                } else {
-                                    arr[i]
-                                },
-                            )
+                            let value = if self.stackplot {
+                                arr.iter().take(i + 1).sum::<f64>()
+                            } else {
+                                arr[i]
+                            };
+                            if value > max_value {
+                                max_value = value;
+                            }
+                            Value::new(day.0 as f64, value)
                         })
                         .collect(),
                 ))
             });
 
-            let mut plot = Plot::new("percentage")
-                .allow_zoom(false)
-                .allow_drag(false)
+            let mut plot = Plot::new(format!("percentage {}", self.moving))
+                .allow_zoom(self.moving)
+                .allow_drag(self.moving)
                 .legend(Legend::default().position(Corner::LeftTop));
             for (line, name) in lines.zip(self.names.iter()) {
                 plot = plot.line(line.name(name));
             }
+
+            let min_day = self.values.keys().next().unwrap().0 as f64;
+            let max_day = self.values.keys().rev().next().unwrap().0 as f64;
+            plot = plot.polygon(
+                Polygon::new(Values::from_values(vec![
+                    Value::new(min_day, 0.),
+                    Value::new(max_day, 0.),
+                    Value::new(max_day, max_value),
+                    Value::new(min_day, max_value),
+                ]))
+                .width(0.)
+                .fill_alpha(0.005),
+            );
             ui.add(plot);
         }
     }
@@ -2138,7 +2231,6 @@ mod gui {
                             *position -= 1;
                             update_scroll = true;
                         }
-                        ui.monospace(format!("{:3}", *position));
                         if ui
                             .add(Button::new("▶").enabled(*position + 1 < found.len()))
                             .clicked()
@@ -2146,7 +2238,7 @@ mod gui {
                             *position += 1;
                             update_scroll = true;
                         }
-                        ui.label(format!("/{}", found.len() - 1));
+                        ui.label(format!("{}/{}", *position, found.len() - 1));
                     });
                     ui.separator();
                     ScrollArea::from_max_height(200.0).show(ui, |ui| {
@@ -2228,7 +2320,10 @@ mod gui {
 
     impl WindowTrait for GithubActivityWindow {
         fn create_window(&self) -> Window<'static> {
-            Window::new("Activity").scroll(false).collapsible(false)
+            Window::new("Activity")
+                .scroll(false)
+                .collapsible(false)
+                .resizable(false)
         }
     }
 
@@ -2334,7 +2429,7 @@ mod gui {
             })
         }
 
-        fn ui(&mut self, ui: &mut Ui) {
+        fn ui(&mut self, ui: &mut Ui, settings: &Settings) {
             ui.horizontal(|ui| {
                 ui.label("Show data about: ");
                 ui.selectable_value(&mut self.show, 0, "Attempts");
@@ -2369,9 +2464,9 @@ mod gui {
             let min = rect.min + egui::vec2(margin + weekday_size, margin + month_size);
             let size2 = egui::vec2(size, size);
             let margin2 = egui::vec2(margin, margin) / 2.;
-            let stroke_hovered = Stroke::new(1., Color32::WHITE);
-            let stroke_month = Stroke::new(0.5, Color32::WHITE);
-            let stroke_year = Stroke::new(1., Color32::RED);
+            let stroke_hovered = Stroke::new(1., settings.color_github_month());
+            let stroke_month = Stroke::new(0.5, settings.color_github_month());
+            let stroke_year = Stroke::new(1., settings.color_github_year());
             let left_1 = egui::vec2(-margin / 2., -margin / 2.);
             let right_1 = egui::vec2(size + margin / 2., -margin / 2.);
             let right_2 = egui::vec2(size + margin / 2., -margin / 2. - month_size);
@@ -2452,7 +2547,8 @@ mod gui {
                         ui.visuals().faint_bg_color
                     } else if let Some(value) = self.get_normalized_value(day) {
                         Color32::from(lerp(
-                            Rgba::from(ui.visuals().faint_bg_color)..=Rgba::from(Color32::GREEN),
+                            Rgba::from(ui.visuals().faint_bg_color)
+                                ..=Rgba::from(settings.color_github_high()),
                             (((value as f32) + 0.2) / 1.2).powi(2),
                         ))
                     } else {
@@ -3257,8 +3353,6 @@ fn user_dpi() -> &'static mut f32 {
 
 #[macroquad::main(window_conf)]
 async fn main() {
-    *user_dpi() = 1.75;
-
     /// Приватная функция
     fn current_day() -> Day {
         Day((miniquad::date::now() / 60. / 60. / 24.) as _)
@@ -3269,6 +3363,8 @@ async fn main() {
     color_backtrace::install();
 
     let (words, settings, stats) = gui::Program::load();
+
+    *user_dpi() = settings.dpi;
 
     let mut pause_detector = PauseDetector::new(
         stats
@@ -3290,7 +3386,11 @@ async fn main() {
     let pause = Texture2D::from_file_with_format(include_bytes!("../pause.png"), None);
 
     loop {
-        clear_background(BLACK);
+        if program.get_settings().white_theme {
+            clear_background(WHITE);
+        } else {
+            clear_background(BLACK);
+        }
 
         egui_macroquad::ui(|ctx| {
             program.ui(ctx, today, pause_detector.get_working_time());
