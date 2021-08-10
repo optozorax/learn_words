@@ -223,7 +223,10 @@ pub struct Words(BTreeMap<String, Vec<WordStatus>>);
 enum WordsToAdd {
     KnowPreviously,
     TrashWord,
-    ToLearn { translations: Vec<String> },
+    ToLearn {
+        learned: Vec<String>,
+        translations: Vec<String>,
+    },
 }
 
 struct WordsToLearn {
@@ -249,13 +252,23 @@ impl Words {
         match info {
             KnowPreviously => entry.push(WordStatus::KnowPreviously),
             TrashWord => entry.push(WordStatus::TrashWord),
-            ToLearn { translations } => {
+            ToLearn {
+                learned,
+                translations,
+            } => {
                 for translation in &translations {
                     entry.push(WordStatus::ToLearn {
                         translation: translation.clone(),
                         last_learn: today,
                         current_level: 0,
                         current_count: 0,
+                        stats: Default::default(),
+                    });
+                    day_stats.new_unknown_words_count += 1;
+                }
+                for translation in &learned {
+                    entry.push(WordStatus::Learned {
+                        translation: translation.clone(),
                         stats: Default::default(),
                     });
                     day_stats.new_unknown_words_count += 1;
@@ -269,6 +282,15 @@ impl Words {
                             last_learn: today,
                             current_level: 0,
                             current_count: 0,
+                            stats: Default::default(),
+                        });
+                }
+                for translation in learned {
+                    self.0
+                        .entry(translation)
+                        .or_insert_with(Vec::new)
+                        .push(WordStatus::Learned {
+                            translation: word.clone(),
                             stats: Default::default(),
                         });
                 }
@@ -1718,6 +1740,8 @@ mod gui {
         text: String,
         words: WordsWithContext,
         translations: String,
+        known_translations: String,
+        previous: Option<(String, Vec<std::ops::Range<usize>>)>,
     }
 
     impl WindowTrait for AddWordsWindow {
@@ -1735,6 +1759,8 @@ mod gui {
                 text,
                 words,
                 translations: String::new(),
+                known_translations: String::new(),
+                previous: None,
             }
         }
 
@@ -1761,11 +1787,30 @@ mod gui {
                     true,
                 );
                 ui.separator();
-                if let Some((word, to_add)) =
-                    word_to_add(ui, &mut self.words.0[0].0, &mut self.translations)
-                {
+                ui.horizontal(|ui| {
+                    if ui.button("Skip").clicked() {
+                        self.translations.clear();
+                        self.known_translations.clear();
+                        self.previous = Some(self.words.0.remove(0));
+                    }
+                    if let Some((text, ranges)) = &self.previous {
+                        if ui.button(format!("Return ({})", text)).clicked() {
+                            self.words.0.insert(0, (text.clone(), ranges.clone()));
+                            self.previous = None;
+                        }
+                    } else {
+                        ui.add(Button::new("Return previous").enabled(false));
+                    }
+                });
+                if let Some((word, to_add)) = word_to_add(
+                    ui,
+                    &mut self.words.0[0].0,
+                    &mut self.translations,
+                    &mut self.known_translations,
+                ) {
                     self.translations.clear();
-                    self.words.0.remove(0);
+                    self.known_translations.clear();
+                    self.previous = Some(self.words.0.remove(0));
                     action = Some((word, to_add, self.words.0.is_empty()));
                 }
 
@@ -1815,6 +1860,7 @@ mod gui {
     struct AddCustomWordsWindow {
         word: String,
         translations: String,
+        known_translations: String,
     }
 
     impl WindowTrait for AddCustomWordsWindow {
@@ -1830,8 +1876,14 @@ mod gui {
         fn ui(&mut self, ui: &mut Ui) -> Option<(String, WordsToAdd)> {
             let mut action = None;
             ui.separator();
-            if let Some((word, to_add)) = word_to_add(ui, &mut self.word, &mut self.translations) {
+            if let Some((word, to_add)) = word_to_add(
+                ui,
+                &mut self.word,
+                &mut self.translations,
+                &mut self.known_translations,
+            ) {
                 self.translations.clear();
+                self.known_translations.clear();
                 self.word.clear();
                 action = Some((word, to_add));
             }
@@ -2820,9 +2872,9 @@ mod gui {
             rng: &mut Rand,
         ) {
             egui::Window::new("Learn words")
-                .fixed_size((300., 300.))
+                .fixed_size((300., 0.))
                 .collapsible(false)
-                .scroll(true)
+                .scroll(false)
                 .show(ctx, |ui| match &mut self.current {
                     LearnWords::None => {
                         ui.label("🎉🎉🎉 Everything is learned for today! 🎉🎉🎉");
@@ -3177,6 +3229,7 @@ mod gui {
         ui: &mut Ui,
         word: &mut String,
         translations: &mut String,
+        known_translations: &mut String,
     ) -> Option<(String, WordsToAdd)> {
         let mut action = None;
         ui.horizontal(|ui| {
@@ -3194,11 +3247,19 @@ mod gui {
         });
         ui.separator();
         ui.label("Translations:");
-        ui.text_edit_multiline(translations);
+        ui.add(TextEdit::multiline(translations).desired_rows(2));
+        ui.separator();
+        ui.label("Known translations:");
+        ui.add(TextEdit::multiline(known_translations).desired_rows(2));
         if ui.button("Add these translations").clicked() {
             action = Some((
                 word.clone(),
                 WordsToAdd::ToLearn {
+                    learned: known_translations
+                        .split('\n')
+                        .map(|x| x.to_string())
+                        .filter(|x| !x.is_empty())
+                        .collect(),
                     translations: translations
                         .split('\n')
                         .map(|x| x.to_string())
