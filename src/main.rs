@@ -65,7 +65,11 @@ impl LearnType {
 
 impl LearnType {
     fn can_learn_today(&self, last_learn: Day, today: Day) -> bool {
-        today.0 - last_learn.0 >= self.wait_days as u64
+        if today.0 >= last_learn.0 {
+            today.0 - last_learn.0 >= self.wait_days as u64
+        } else {
+            false
+        }
     }
 }
 
@@ -180,9 +184,9 @@ impl WordStatus {
         } = self
         {
             type_count
-                .iter()
-                .skip(*current_level as _)
-                .any(|learn| learn.can_learn_today(*last_learn, today))
+                .get(*current_level as usize)
+                .map(|learn| learn.can_learn_today(*last_learn, today))
+                .unwrap_or(false)
         } else {
             false
         }
@@ -212,6 +216,25 @@ impl WordStatus {
             Some(*current_level)
         } else {
             None
+        }
+    }
+
+    fn overdue_days(&self, today: Day, type_count: &[LearnType]) -> u64 {
+        use WordStatus::*;
+        if let ToLearn {
+            last_learn,
+            current_level,
+            ..
+        } = self
+        {
+            let date_to_learn = last_learn.0 + type_count[*current_level as usize].wait_days as u64;
+            if today.0 > date_to_learn {
+                0
+            } else {
+                date_to_learn - today.0
+            }
+        } else {
+            0
         }
     }
 }
@@ -469,6 +492,17 @@ impl Words {
                     })
                     .collect();
             }
+        }
+    }
+
+    fn max_overdue_days(&self, word: &str, today: Day, type_count: &[LearnType]) -> u64 {
+        if let Some(trs) = self.0.get(word) {
+            trs.iter()
+                .map(|x| x.overdue_days(today, type_count))
+                .max()
+                .unwrap_or(0)
+        } else {
+            0
         }
     }
 }
@@ -2740,8 +2774,8 @@ mod gui {
 
     // Это окно нельзя закрыть
     struct LearnWordsWindow {
-        to_type_repeat: Vec<String>,
-        to_type_new: Vec<String>,
+        to_type_repeat: Vec<(String, u64)>,
+        to_type_new: Vec<(String, u64)>,
 
         to_type_today: Option<Vec<String>>,
         current: LearnWords,
@@ -2777,6 +2811,26 @@ mod gui {
         correct: bool,
         translation: String,
         typed: String,
+    }
+
+    fn select_with_translations(
+        word: &str,
+        words: &Words,
+        today: Day,
+        type_count: &[LearnType],
+        mut f: impl FnMut(&str),
+    ) {
+        f(word);
+        if let Some(variants) = words.0.get(word) {
+            for i in variants {
+                if i.can_learn_today(today, type_count) {
+                    dbg!(&i);
+                    if let WordStatus::ToLearn { translation, .. } = i {
+                        f(translation);
+                    }
+                }
+            }
+        }
     }
 
     impl LearnWordsWindow {
@@ -2826,6 +2880,7 @@ mod gui {
                             .map(|_| String::new())
                             .collect();
                         if words_to_type.is_empty() && words_to_guess.is_empty() {
+                            println!("remove {}", word);
                             to_type_today.remove(position);
                         } else {
                             self.current = LearnWords::Typing {
@@ -2855,8 +2910,21 @@ mod gui {
 
         fn update(&mut self, words: &Words, today: Day, type_count: &[LearnType], rng: &mut Rand) {
             let (repeat, new) = words.get_words_to_learn_today(today, type_count);
-            self.to_type_repeat = repeat;
-            self.to_type_new = new;
+
+            self.to_type_repeat.clear();
+            for i in repeat {
+                let overdue = words.max_overdue_days(&i, today, type_count);
+                self.to_type_repeat.push((i, overdue));
+            }
+            self.to_type_repeat.sort_by_key(|x| std::cmp::Reverse(x.1));
+
+            self.to_type_new.clear();
+            for i in new {
+                let overdue = words.max_overdue_days(&i, today, type_count);
+                self.to_type_new.push((i, overdue));
+            }
+            self.to_type_new.sort_by_key(|x| std::cmp::Reverse(x.1));
+
             self.pick_current_type(words, today, type_count, rng);
         }
 
@@ -2909,15 +2977,36 @@ mod gui {
                             let to_type_new = &mut self.to_type_new;
 
                             self.to_type_today = Some({
-                                let mut result: Vec<_> = (0..*n_repeat)
-                                    .map(|_| {
-                                        to_type_repeat
-                                            .remove(rng.gen_range(0, to_type_repeat.len()))
-                                    })
-                                    .collect();
-                                result.extend((0..*n_new).map(|_| {
-                                    to_type_new.remove(rng.gen_range(0, to_type_new.len()))
-                                }));
+                                let mut result = Vec::new();
+
+                                while !to_type_repeat.is_empty() && result.len() < *n_repeat {
+                                    let first = to_type_repeat[0].clone();
+                                    select_with_translations(
+                                        &first.0,
+                                        words,
+                                        today,
+                                        &settings.type_count,
+                                        |word| {
+                                            to_type_repeat.retain(|x| x.0 != word);
+                                            result.push(word.to_string());
+                                        },
+                                    );
+                                }
+
+                                while !to_type_new.is_empty() && result.len() < *n_repeat + *n_new {
+                                    let first = to_type_new[0].clone();
+                                    select_with_translations(
+                                        &first.0,
+                                        words,
+                                        today,
+                                        &settings.type_count,
+                                        |word| {
+                                            to_type_repeat.retain(|x| x.0 != word);
+                                            result.push(word.to_string());
+                                        },
+                                    );
+                                }
+
                                 result
                             });
                             self.pick_current_type(words, today, &settings.type_count, rng);
