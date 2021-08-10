@@ -176,6 +176,17 @@ impl WordStatus {
         }
     }
 
+    fn has_hint(&self, type_count: &[LearnType]) -> bool {
+        use WordStatus::*;
+        match self {
+            KnowPreviously | TrashWord | Learned { .. } => false,
+            ToLearn { current_level, .. } => type_count
+                .get(*current_level as usize)
+                .map(|x| x.show_word)
+                .unwrap_or(false),
+        }
+    }
+
     fn can_learn_today(&self, today: Day, type_count: &[LearnType]) -> bool {
         if let WordStatus::ToLearn {
             last_learn,
@@ -232,6 +243,29 @@ impl WordStatus {
                 0
             } else {
                 date_to_learn - today.0
+            }
+        } else {
+            0
+        }
+    }
+
+    fn attempts_remains(&self, today: Day, type_count: &[LearnType]) -> u8 {
+        use WordStatus::*;
+        if let ToLearn {
+            last_learn,
+            current_level,
+            current_count,
+            ..
+        } = self
+        {
+            if let Some(learn) = type_count.get(*current_level as usize) {
+                if learn.can_learn_today(*last_learn, today) {
+                    learn.count - current_count
+                } else {
+                    0
+                }
+            } else {
+                0
             }
         } else {
             0
@@ -332,6 +366,14 @@ impl Words {
         } else {
             err!();
             true
+        }
+    }
+
+    fn has_hint(&self, word: &str, type_count: &[LearnType]) -> bool {
+        if let Some(word) = self.0.get(word) {
+            word.iter().any(|x| x.has_hint(type_count))
+        } else {
+            false
         }
     }
 
@@ -499,6 +541,17 @@ impl Words {
         if let Some(trs) = self.0.get(word) {
             trs.iter()
                 .map(|x| x.overdue_days(today, type_count))
+                .max()
+                .unwrap_or(0)
+        } else {
+            0
+        }
+    }
+
+    fn max_attempts_remains(&self, word: &str, today: Day, type_count: &[LearnType]) -> u8 {
+        if let Some(trs) = self.0.get(word) {
+            trs.iter()
+                .map(|x| x.attempts_remains(today, type_count))
                 .max()
                 .unwrap_or(0)
         } else {
@@ -2772,12 +2825,17 @@ mod gui {
         }
     }
 
+    struct ToTypeToday {
+        all_words: Vec<String>,
+        current_batch: Vec<String>,
+    }
+
     // Это окно нельзя закрыть
     struct LearnWordsWindow {
         to_type_repeat: Vec<(String, u64)>,
         to_type_new: Vec<(String, u64)>,
 
-        to_type_today: Option<Vec<String>>,
+        to_type_today: Option<ToTypeToday>,
         current: LearnWords,
     }
 
@@ -2795,6 +2853,7 @@ mod gui {
             correct_answer: WordsToLearn,
             words_to_type: Vec<String>,
             words_to_guess: Vec<String>,
+            max_types: u8,
             gain_focus: bool,
         },
         Checked {
@@ -2803,6 +2862,7 @@ mod gui {
             typed: Vec<String>,
             to_repeat: Vec<String>,
             result: Vec<TypedWord>,
+            max_types: u8,
             gain_focus: bool,
         },
     }
@@ -2824,7 +2884,6 @@ mod gui {
         if let Some(variants) = words.0.get(word) {
             for i in variants {
                 if i.can_learn_today(today, type_count) {
-                    dbg!(&i);
                     if let WordStatus::ToLearn { translation, .. } = i {
                         f(translation);
                     }
@@ -2846,6 +2905,16 @@ mod gui {
             result
         }
 
+        fn cancel_learning(&mut self) {
+            self.to_type_today = None;
+            self.current = LearnWords::Choose {
+                all_repeat: self.to_type_repeat.len(),
+                all_new: self.to_type_new.len(),
+                n_repeat: 30,
+                n_new: 15,
+            };
+        }
+
         fn pick_current_type(
             &mut self,
             words: &Words,
@@ -2862,17 +2931,33 @@ mod gui {
                 if self
                     .to_type_today
                     .as_ref()
-                    .map(|x| x.is_empty())
+                    .map(|x| x.all_words.is_empty())
                     .unwrap_or(false)
                 {
                     self.to_type_today = None;
                 }
 
                 if let Some(to_type_today) = &mut self.to_type_today {
-                    let position = rng.gen_range(0, to_type_today.len());
-                    let word = &to_type_today[position];
-                    if !words.is_learned(word) {
-                        let result = words.get_word_to_learn(word, today, type_count);
+                    if to_type_today.current_batch.is_empty() {
+                        let (hint_words, guess_words): (Vec<_>, Vec<_>) = to_type_today
+                            .all_words
+                            .iter()
+                            .cloned()
+                            .partition(|x| words.has_hint(x, type_count));
+
+                        if hint_words.is_empty() {
+                            to_type_today.current_batch = guess_words;
+                        } else {
+                            to_type_today.current_batch = hint_words;
+                        }
+
+                        to_type_today.current_batch.shuffle(rng);
+                    }
+
+                    let word = to_type_today.current_batch.remove(0);
+                    if !words.is_learned(&word) {
+                        let max_types = words.max_attempts_remains(&word, today, type_count);
+                        let result = words.get_word_to_learn(&word, today, type_count);
                         let words_to_type: Vec<String> = (0..result.words_to_type.len())
                             .map(|_| String::new())
                             .collect();
@@ -2880,29 +2965,26 @@ mod gui {
                             .map(|_| String::new())
                             .collect();
                         if words_to_type.is_empty() && words_to_guess.is_empty() {
-                            println!("remove {}", word);
-                            to_type_today.remove(position);
+                            to_type_today.all_words.retain(|x| *x != word);
+                            to_type_today.current_batch.retain(|x| *x != word);
                         } else {
                             self.current = LearnWords::Typing {
-                                word: word.clone(),
+                                word,
                                 word_by_hint: (!words_to_type.is_empty()).then(String::new),
                                 correct_answer: result,
                                 words_to_type,
+                                max_types,
                                 words_to_guess,
                                 gain_focus: true,
                             };
                             return;
                         }
                     } else {
-                        to_type_today.remove(position);
+                        to_type_today.all_words.retain(|x| *x != word);
+                        to_type_today.current_batch.retain(|x| *x != word);
                     }
                 } else {
-                    self.current = LearnWords::Choose {
-                        all_repeat: self.to_type_repeat.len(),
-                        all_new: self.to_type_new.len(),
-                        n_repeat: 30,
-                        n_new: 15,
-                    };
+                    self.cancel_learning();
                     return;
                 }
             }
@@ -2939,6 +3021,7 @@ mod gui {
             save: &mut bool,
             rng: &mut Rand,
         ) {
+            let mut cancel = false;
             egui::Window::new("Learn words")
                 .fixed_size((300., 0.))
                 .collapsible(false)
@@ -3007,7 +3090,10 @@ mod gui {
                                     );
                                 }
 
-                                result
+                                ToTypeToday {
+                                    all_words: result,
+                                    current_batch: Vec::new(),
+                                }
                             });
                             self.pick_current_type(words, today, &settings.type_count, rng);
                         }
@@ -3019,11 +3105,18 @@ mod gui {
                         words_to_type,
                         words_to_guess,
                         gain_focus,
+                        max_types,
                     } => {
-                        ui.label(format!(
-                            "Words remains: {}",
-                            self.to_type_today.as_ref().unwrap().len()
-                        ));
+                        let len = self.to_type_today.as_ref().unwrap().all_words.len();
+                        ui.with_layout(Layout::right_to_left(), |ui| {
+                            if ui.button("❌").clicked() {
+                                cancel = true;
+                            }
+                            ui.with_layout(Layout::left_to_right(), |ui| {
+                                ui.label(format!("Words remains: {}.", len));
+                            });
+                        });
+                        ui.label(format!("This word attempts remains: {}.", max_types));
                         ui.separator();
 
                         let mut data = InputFieldData::new(settings, &mut *gain_focus);
@@ -3052,11 +3145,8 @@ mod gui {
                         {
                             InputField::Input.ui(ui, &mut data, i, correct);
                         }
-                        let response = ui.add(Button::new("Check").enabled(data.next_enabled));
-                        if data.give_next_focus == 1 {
-                            response.request_focus();
-                        }
-                        if response.clicked() {
+
+                        if input_field_button(ui, "Check", &mut data) {
                             // Register just typed words
                             for answer in &correct_answer.words_to_type {
                                 words.register_attempt(
@@ -3095,20 +3185,18 @@ mod gui {
                             }
 
                             if result.is_empty() {
-                                if response.clicked() {
-                                    for typed_word in result.iter_mut() {
-                                        words.register_attempt(
-                                            word,
-                                            &typed_word.translation,
-                                            typed_word.correct,
-                                            today,
-                                            day_stats,
-                                            &settings.type_count,
-                                        );
-                                    }
-                                    self.pick_current_type(words, today, &settings.type_count, rng);
-                                    *save = true;
+                                for typed_word in result.iter_mut() {
+                                    words.register_attempt(
+                                        word,
+                                        &typed_word.translation,
+                                        typed_word.correct,
+                                        today,
+                                        day_stats,
+                                        &settings.type_count,
+                                    );
                                 }
+                                self.pick_current_type(words, today, &settings.type_count, rng);
+                                *save = true;
                             } else {
                                 self.current = LearnWords::Checked {
                                     word: word.clone(),
@@ -3116,6 +3204,7 @@ mod gui {
                                     typed: correct_answer.words_to_type.clone(),
                                     to_repeat: (0..result.len()).map(|_| String::new()).collect(),
                                     result,
+                                    max_types: *max_types,
                                     gain_focus: true,
                                 };
                             }
@@ -3127,12 +3216,19 @@ mod gui {
                         typed,
                         result,
                         to_repeat,
+                        max_types,
                         gain_focus,
                     } => {
-                        ui.label(format!(
-                            "Words remains: {}",
-                            self.to_type_today.as_ref().unwrap().len()
-                        ));
+                        let len = self.to_type_today.as_ref().unwrap().all_words.len();
+                        ui.with_layout(Layout::right_to_left(), |ui| {
+                            if ui.button("❌").clicked() {
+                                cancel = true;
+                            }
+                            ui.with_layout(Layout::left_to_right(), |ui| {
+                                ui.label(format!("Words remains: {}.", len));
+                            });
+                        });
+                        ui.label(format!("This word attempts remains: {}.", max_types));
                         ui.separator();
                         ui.add(Label::new(&word).heading().strong());
 
@@ -3168,15 +3264,7 @@ mod gui {
                             }
                         }
 
-                        let response = ui.add(Button::new("Next").enabled(data.next_enabled));
-                        if data.give_next_focus == 1 {
-                            response.request_focus();
-                        }
-                        if *data.gain_focus {
-                            response.request_focus();
-                            *data.gain_focus = false;
-                        }
-                        if response.clicked() {
+                        if input_field_button(ui, "Next", &mut data) {
                             for typed_word in result.iter_mut() {
                                 words.register_attempt(
                                     word,
@@ -3192,6 +3280,9 @@ mod gui {
                         }
                     }
                 });
+            if cancel {
+                self.cancel_learning();
+            }
         }
     }
 
@@ -3252,6 +3343,14 @@ mod gui {
             }
             self.last_response = Some(response);
         }
+    }
+
+    fn input_field_button(ui: &mut Ui, text: &str, data: &mut InputFieldData) -> bool {
+        data.is_empty = true;
+        let response = ui.add(Button::new(text).enabled(data.next_enabled));
+        let result = response.clicked();
+        data.process_focus(response);
+        result
     }
 
     impl InputField<'_> {
