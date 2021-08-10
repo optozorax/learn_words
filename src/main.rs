@@ -1005,6 +1005,7 @@ mod gui {
                     *words = words1;
                     *settings = settings1;
                     *stats = stats1;
+                    *user_dpi() = settings.dpi;
                     if let Some(time) = stats.by_day.get(&today).map(|x| x.working_time) {
                         *working_time = time;
                     }
@@ -1777,8 +1778,8 @@ mod gui {
                 ScrollArea::from_max_height(200.0).show(ui, |ui| {
                     const CONTEXT_SIZE: usize = 50;
                     for range in &self.words.0[0].1 {
-                        let start = range.start.saturating_sub(CONTEXT_SIZE);
-                        let end = {
+                        let mut start = range.start.saturating_sub(CONTEXT_SIZE);
+                        let mut end = {
                             let result = range.end + CONTEXT_SIZE;
                             if result > self.text.len() {
                                 self.text.len()
@@ -1786,6 +1787,12 @@ mod gui {
                                 result
                             }
                         };
+                        while start > 0 && !self.text.is_char_boundary(start) {
+                            start -= 1;
+                        }
+                        while end < self.text.len() && !self.text.is_char_boundary(end) {
+                            end += 1;
+                        }
                         ui.horizontal_wrapped(|ui| {
                             ui.spacing_mut().item_spacing.x = 0.;
                             ui.label("...");
@@ -2707,10 +2714,17 @@ mod gui {
         Checked {
             word: String,
             known_words: Vec<String>,
-            words_to_type: Vec<Result<String, (String, String)>>,
-            words_to_guess: Vec<Result<String, (String, String)>>,
+            typed: Vec<String>,
+            to_repeat: Vec<String>,
+            result: Vec<TypedWord>,
             gain_focus: bool,
         },
+    }
+
+    struct TypedWord {
+        correct: bool,
+        translation: String,
+        typed: String,
     }
 
     impl LearnWordsWindow {
@@ -2806,9 +2820,9 @@ mod gui {
             rng: &mut Rand,
         ) {
             egui::Window::new("Learn words")
-                .fixed_size((300., 100.))
+                .fixed_size((300., 300.))
                 .collapsible(false)
-                .scroll(false)
+                .scroll(true)
                 .show(ctx, |ui| match &mut self.current {
                     LearnWords::None => {
                         ui.label("🎉🎉🎉 Everything is learned for today! 🎉🎉🎉");
@@ -2871,39 +2885,11 @@ mod gui {
                         ));
                         ui.separator();
 
-                        let mut enabled = true;
-                        let mut focus_gained = false;
-                        let mut give_next_focus = 0;
+                        let mut data = InputFieldData::new(settings, &mut *gain_focus);
 
                         if let Some(word_by_hint) = word_by_hint {
                             ui.label("Word:");
-
-                            let response = ui.add(
-                                egui::TextEdit::singleline(word_by_hint)
-                                    .hint_text(format!(" {}", word)),
-                            );
-
-                            enabled = word_by_hint == word;
-
-                            if settings.use_keyboard_layout {
-                                settings.keyboard_layout.change(word, word_by_hint);
-                            }
-                            if give_next_focus == 1 {
-                                response.request_focus();
-                                give_next_focus = 2;
-                            }
-                            if response.has_focus()
-                                && is_key_pressed(KeyCode::Enter)
-                                && give_next_focus == 0
-                            {
-                                give_next_focus = 1;
-                            }
-                            if !focus_gained && *gain_focus {
-                                response.request_focus();
-                                focus_gained = true;
-                                *gain_focus = false;
-                            }
-
+                            InputField::Hint.ui(ui, &mut data, word_by_hint, word);
                             ui.separator();
                         } else {
                             ui.add(Label::new(&word).heading().strong());
@@ -2917,81 +2903,32 @@ mod gui {
                             .iter()
                             .zip(words_to_type.iter_mut())
                         {
-                            let response = ui.add(
-                                egui::TextEdit::singleline(i)
-                                    .hint_text(format!(" {}", hint))
-                                    .enabled(enabled),
-                            );
-                            if settings.use_keyboard_layout {
-                                settings.keyboard_layout.change(hint, i);
-                            }
-                            if give_next_focus == 1 {
-                                response.request_focus();
-                                give_next_focus = 2;
-                            }
-                            if response.has_focus()
-                                && is_key_pressed(KeyCode::Enter)
-                                && give_next_focus == 0
-                            {
-                                give_next_focus = 1;
-                            }
-                            if !focus_gained && *gain_focus {
-                                response.request_focus();
-                                focus_gained = true;
-                                *gain_focus = false;
-                            }
+                            InputField::Hint.ui(ui, &mut data, i, hint);
                         }
                         for (i, correct) in words_to_guess
                             .iter_mut()
                             .zip(correct_answer.words_to_guess.iter())
                         {
-                            let response = ui.add(egui::TextEdit::singleline(i).enabled(enabled));
-                            if settings.use_keyboard_layout {
-                                settings.keyboard_layout.change(correct, i);
-                            }
-                            if give_next_focus == 1 {
-                                response.request_focus();
-                                give_next_focus = 2;
-                            }
-                            if response.has_focus()
-                                && is_key_pressed(KeyCode::Enter)
-                                && give_next_focus == 0
-                            {
-                                give_next_focus = 1;
-                            }
-                            if !focus_gained && *gain_focus {
-                                response.request_focus();
-                                focus_gained = true;
-                                *gain_focus = false;
-                            }
+                            InputField::Input.ui(ui, &mut data, i, correct);
                         }
-                        let response = ui.add(Button::new("check").enabled(enabled));
-                        if give_next_focus == 1 {
+                        let response = ui.add(Button::new("Check").enabled(data.next_enabled));
+                        if data.give_next_focus == 1 {
                             response.request_focus();
                         }
                         if response.clicked() {
-                            let mut words_to_type_result = Vec::new();
-                            let mut words_to_guess_result = Vec::new();
-                            for (answer, i) in correct_answer
-                                .words_to_type
-                                .iter()
-                                .zip(words_to_type.iter_mut())
-                            {
-                                let correct = answer == i;
+                            // Register just typed words
+                            for answer in &correct_answer.words_to_type {
                                 words.register_attempt(
                                     word,
                                     answer,
-                                    correct,
+                                    true,
                                     today,
                                     day_stats,
                                     &settings.type_count,
                                 );
-                                if correct {
-                                    words_to_type_result.push(Ok(answer.clone()));
-                                } else {
-                                    words_to_guess_result.push(Err((answer.clone(), i.clone())));
-                                }
                             }
+
+                            let mut result = Vec::new();
                             let mut answers = correct_answer.words_to_guess.clone();
                             let mut corrects = Vec::new();
                             for typed in &*words_to_guess {
@@ -3001,45 +2938,54 @@ mod gui {
                             }
 
                             for typed in &*words_to_guess {
-                                if let Some(position) = corrects.iter().position(|x| x == typed) {
-                                    words.register_attempt(
-                                        word,
-                                        &corrects[position],
-                                        true,
-                                        today,
-                                        day_stats,
-                                        &settings.type_count,
-                                    );
-                                    corrects.remove(position);
-                                    words_to_type_result.push(Ok(typed.clone()));
+                                let (answer, correct) = if let Some(position) =
+                                    corrects.iter().position(|x| x == typed)
+                                {
+                                    (corrects.remove(position), true)
                                 } else {
-                                    let answer = answers.remove(0);
-                                    words.register_attempt(
-                                        word,
-                                        &answer,
-                                        false,
-                                        today,
-                                        day_stats,
-                                        &settings.type_count,
-                                    );
-                                    words_to_guess_result.push(Err((answer, typed.clone())));
-                                }
+                                    (answers.remove(0), false)
+                                };
+
+                                result.push(TypedWord {
+                                    correct,
+                                    translation: answer,
+                                    typed: typed.clone(),
+                                });
                             }
 
-                            self.current = LearnWords::Checked {
-                                word: word.clone(),
-                                known_words: correct_answer.known_words.clone(),
-                                words_to_type: words_to_type_result,
-                                words_to_guess: words_to_guess_result,
-                                gain_focus: true,
-                            };
+                            if result.is_empty() {
+                                if response.clicked() {
+                                    for typed_word in result.iter_mut() {
+                                        words.register_attempt(
+                                            word,
+                                            &typed_word.translation,
+                                            typed_word.correct,
+                                            today,
+                                            day_stats,
+                                            &settings.type_count,
+                                        );
+                                    }
+                                    self.pick_current_type(words, today, &settings.type_count, rng);
+                                    *save = true;
+                                }
+                            } else {
+                                self.current = LearnWords::Checked {
+                                    word: word.clone(),
+                                    known_words: correct_answer.known_words.clone(),
+                                    typed: correct_answer.words_to_type.clone(),
+                                    to_repeat: (0..result.len()).map(|_| String::new()).collect(),
+                                    result,
+                                    gain_focus: true,
+                                };
+                            }
                         }
                     }
                     LearnWords::Checked {
                         word,
                         known_words,
-                        words_to_type,
-                        words_to_guess,
+                        typed,
+                        result,
+                        to_repeat,
                         gain_focus,
                     } => {
                         ui.label(format!(
@@ -3049,41 +2995,181 @@ mod gui {
                         ui.separator();
                         ui.add(Label::new(&word).heading().strong());
 
+                        let mut data = InputFieldData::new(settings, &mut *gain_focus);
+
                         for i in known_words {
                             ui.add(egui::TextEdit::singleline(i).enabled(false));
                         }
 
-                        Grid::new("matrix").striped(true).show(ui, |ui| {
-                            for word in words_to_type.iter_mut().chain(words_to_guess.iter_mut()) {
-                                match word {
-                                    Ok(word) => {
-                                        with_green_color(ui, |ui| {
-                                            ui.add(egui::TextEdit::singleline(word).enabled(false));
-                                        });
-                                        ui.label(format!("✅ {}", word));
-                                    }
-                                    Err((answer, word)) => {
-                                        with_red_color(ui, |ui| {
-                                            ui.add(egui::TextEdit::singleline(word).enabled(false));
-                                        });
-                                        ui.label(format!("❌ {}", answer));
-                                    }
-                                }
-                                ui.end_row();
-                            }
-                        });
+                        for i in typed {
+                            with_green_color(ui, |ui| {
+                                ui.add(egui::TextEdit::singleline(i).enabled(false));
+                            });
+                        }
 
-                        let response = ui.add(Button::new("Next"));
-                        if *gain_focus {
+                        for word in result.iter_mut() {
+                            InputField::Checked(&mut word.correct).ui(
+                                ui,
+                                &mut data,
+                                &mut word.typed,
+                                &word.translation,
+                            );
+                        }
+
+                        if result.iter().any(|x| !x.correct) {
+                            ui.separator();
+                            ui.label("Correction of mistakes:");
+                        }
+
+                        for (word, to_repeat) in result.iter_mut().zip(to_repeat.iter_mut()) {
+                            if !word.correct {
+                                InputField::Hint.ui(ui, &mut data, to_repeat, &word.translation);
+                            }
+                        }
+
+                        let response = ui.add(Button::new("Next").enabled(data.next_enabled));
+                        if data.give_next_focus == 1 {
                             response.request_focus();
-                            *gain_focus = false;
+                        }
+                        if *data.gain_focus {
+                            response.request_focus();
+                            *data.gain_focus = false;
                         }
                         if response.clicked() {
+                            for typed_word in result.iter_mut() {
+                                words.register_attempt(
+                                    word,
+                                    &typed_word.translation,
+                                    typed_word.correct,
+                                    today,
+                                    day_stats,
+                                    &settings.type_count,
+                                );
+                            }
                             self.pick_current_type(words, today, &settings.type_count, rng);
                             *save = true;
                         }
                     }
                 });
+        }
+    }
+
+    enum InputField<'a> {
+        Hint,
+        Input,
+        Checked(&'a mut bool),
+    }
+
+    struct InputFieldData<'a> {
+        last_response: Option<Response>,
+        give_next_focus: u8,
+        focus_gained: bool,
+        gain_focus: &'a mut bool,
+        settings: &'a Settings,
+        is_empty: bool,
+
+        next_enabled: bool,
+    }
+
+    impl<'a> InputFieldData<'a> {
+        fn new(settings: &'a Settings, gain_focus: &'a mut bool) -> InputFieldData<'a> {
+            Self {
+                last_response: None,
+                give_next_focus: 0,
+                focus_gained: false,
+                gain_focus,
+                settings,
+                is_empty: false,
+
+                next_enabled: true,
+            }
+        }
+
+        fn process_text(&self, input: &mut String, should_be: &str) {
+            if self.settings.use_keyboard_layout {
+                self.settings.keyboard_layout.change(should_be, input);
+            }
+        }
+
+        fn process_focus(&mut self, response: Response) {
+            if self.give_next_focus == 1 && self.next_enabled {
+                response.request_focus();
+                self.give_next_focus = 2;
+            }
+            if response.has_focus() && is_key_pressed(KeyCode::Backspace) && self.is_empty {
+                if let Some(last_response) = &self.last_response {
+                    last_response.request_focus();
+                }
+            }
+            if response.has_focus() && is_key_pressed(KeyCode::Enter) && self.give_next_focus == 0 {
+                self.give_next_focus = 1;
+            }
+            if !self.focus_gained && *self.gain_focus && self.next_enabled {
+                response.request_focus();
+                self.focus_gained = true;
+                *self.gain_focus = false;
+            }
+            self.last_response = Some(response);
+        }
+    }
+
+    impl InputField<'_> {
+        fn ui(
+            &mut self,
+            ui: &mut Ui,
+            data: &mut InputFieldData,
+            input: &mut String,
+            should_be: &str,
+        ) {
+            use InputField::*;
+            match self {
+                Hint => {
+                    data.is_empty = input.is_empty();
+                    let response = if input == should_be {
+                        with_green_color(ui, |ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(input)
+                                    .hint_text(format!(" {}", should_be))
+                                    .enabled(data.next_enabled),
+                            )
+                        })
+                    } else {
+                        ui.add(
+                            egui::TextEdit::singleline(input)
+                                .hint_text(format!(" {}", should_be))
+                                .enabled(data.next_enabled),
+                        )
+                    };
+                    data.process_text(input, should_be);
+                    data.process_focus(response);
+                    data.next_enabled &= input == should_be;
+                }
+                Input => {
+                    data.is_empty = input.is_empty();
+                    let response =
+                        ui.add(egui::TextEdit::singleline(input).enabled(data.next_enabled));
+                    data.process_text(input, should_be);
+                    data.process_focus(response);
+                }
+                Checked(checked) => {
+                    ui.with_layout(Layout::right_to_left(), |ui| {
+                        if ui.button("Invert").clicked() {
+                            **checked = !**checked;
+                        }
+                        if **checked {
+                            ui.label(format!("✅ {}", should_be));
+                            with_green_color(ui, |ui| {
+                                ui.add(egui::TextEdit::singleline(input).enabled(false));
+                            });
+                        } else {
+                            ui.label(format!("❌ {}", should_be));
+                            with_red_color(ui, |ui| {
+                                ui.add(egui::TextEdit::singleline(input).enabled(false));
+                            });
+                        }
+                    });
+                }
+            }
         }
     }
 
