@@ -1525,49 +1525,101 @@ mod gui {
                 *user_dpi() = settings.dpi;
             });
 
-            if !self.want_to_use_keyboard_layout && settings.use_keyboard_layout {
-                self.want_to_use_keyboard_layout = true;
-            }
-            ui.checkbox(
-                &mut self.want_to_use_keyboard_layout,
-                "Use automatical change of keyboard layout",
-            );
-            if self.want_to_use_keyboard_layout {
+            ui.collapsing("Automatic change of keyboard layout", |ui| {
+                if !self.want_to_use_keyboard_layout && settings.use_keyboard_layout {
+                    self.want_to_use_keyboard_layout = true;
+                }
+                ui.checkbox(
+                    &mut self.want_to_use_keyboard_layout,
+                    "Use automatic change of keyboard layout",
+                );
+                if self.want_to_use_keyboard_layout {
+                    ui.separator();
+                    ui.label("Type all letters on your keyboard in first field, and then in the same order symbols in the second field. Newline is ignored. If you can't type some symbol, you can use space. Count of symbols except newline must be the same of both fields.");
+                    ui.label("First language:");
+                    ui.text_edit_multiline(&mut self.lang1);
+                    ui.label("Second language:");
+                    ui.text_edit_multiline(&mut self.lang2);
+                    if ui.button("Use this keyboard layout").clicked() {
+                        match KeyboardLayout::new(&self.lang1, &self.lang2) {
+                            Ok(ok) => {
+                                settings.use_keyboard_layout = true;
+                                settings.keyboard_layout = ok;
+                                self.info = Some(Ok("Used!".to_string()));
+                            }
+                            Err(err) => {
+                                self.info = Some(Err(err));
+                            }
+                        }
+                    }
+                    if let Some(info) = &self.info {
+                        match info {
+                            Ok(ok) => {
+                                ui.label(ok);
+                            }
+                            Err(err) => {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 0.;
+                                    ui.add(Label::new("Error: ").text_color(Color32::RED).monospace());
+                                    ui.monospace(err);
+                                });
+                            }
+                        }
+                    }
+                } else {
+                    settings.use_keyboard_layout = false;
+                }
+            });
+
+            ui.collapsing("Repeats", |ui| {
+                let mut delete = None;
+                for (pos, i) in settings.type_count.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{}.", pos));
+                        ui.separator();
+                        ui.label("Wait days: ");
+                        ui.add(
+                            egui::DragValue::new(&mut i.wait_days)
+                                .speed(0.1)
+                                .clamp_range(0.0..=99.0)
+                                .min_decimals(0)
+                                .max_decimals(0),
+                        );
+                        ui.separator();
+                        ui.label("Count: ");
+                        ui.add(
+                            egui::DragValue::new(&mut i.count)
+                                .speed(0.1)
+                                .clamp_range(0.0..=99.0)
+                                .min_decimals(0)
+                                .max_decimals(0),
+                        );
+                        ui.separator();
+                        ui.checkbox(&mut i.show_word, "Show hint");
+                        ui.separator();
+                        if ui
+                            .add(Button::new("Delete").text_color(Color32::RED))
+                            .clicked()
+                        {
+                            delete = Some(pos);
+                        }
+                    });
+                }
                 ui.separator();
-                ui.label("Type all letters on your keyboard in first field, and then in the same order symbols in the second field. Newline is ignored. If you can't type some symbol, you can use space. Count of symbols except newline must be the same of both fields.");
-                ui.label("First language:");
-                ui.text_edit_multiline(&mut self.lang1);
-                ui.label("Second language:");
-                ui.text_edit_multiline(&mut self.lang2);
-                if ui.button("Use this keyboard layout").clicked() {
-                    match KeyboardLayout::new(&self.lang1, &self.lang2) {
-                        Ok(ok) => {
-                            settings.use_keyboard_layout = true;
-                            settings.keyboard_layout = ok;
-                            self.info = Some(Ok("Used!".to_string()));
-                        }
-                        Err(err) => {
-                            self.info = Some(Err(err));
-                        }
-                    }
+                if ui
+                    .add(Button::new("Add").text_color(Color32::GREEN))
+                    .clicked()
+                {
+                    settings.type_count.push(LearnType {
+                        wait_days: 0,
+                        count: 1,
+                        show_word: false,
+                    });
                 }
-                if let Some(info) = &self.info {
-                    match info {
-                        Ok(ok) => {
-                            ui.label(ok);
-                        }
-                        Err(err) => {
-                            ui.horizontal_wrapped(|ui| {
-                                ui.spacing_mut().item_spacing.x = 0.;
-                                ui.add(Label::new("Error: ").text_color(Color32::RED).monospace());
-                                ui.monospace(err);
-                            });
-                        }
-                    }
+                if let Some(pos) = delete {
+                    settings.type_count.remove(pos);
                 }
-            } else {
-                settings.use_keyboard_layout = false;
-            }
+            });
         }
     }
 
