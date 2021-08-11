@@ -3121,7 +3121,6 @@ mod gui {
                         to_type_today.current_batch.retain(|x| *x != word);
                     }
                 } else {
-                    self.update(words, today, type_count, rng);
                     self.cancel_learning();
                     return;
                 }
