@@ -1708,7 +1708,7 @@ mod gui {
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 0.;
                 ui.add(egui::Label::new("Version: ").strong());
-                ui.label( env!("CARGO_PKG_VERSION"));
+                ui.label(env!("CARGO_PKG_VERSION"));
             });
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 0.;
@@ -3053,7 +3053,14 @@ mod gui {
             rng: &mut Rand,
         ) {
             loop {
-                if self.to_type_repeat.is_empty() && self.to_type_new.is_empty() {
+                if self.to_type_repeat.is_empty()
+                    && self.to_type_new.is_empty()
+                    && self
+                        .to_type_today
+                        .as_ref()
+                        .map(|x| x.current_batch.is_empty() && x.all_words.is_empty())
+                        .unwrap_or(true)
+                {
                     self.current = LearnWords::None;
                     return;
                 }
@@ -3114,6 +3121,7 @@ mod gui {
                         to_type_today.current_batch.retain(|x| *x != word);
                     }
                 } else {
+                    self.update(words, today, type_count, rng);
                     self.cancel_learning();
                     return;
                 }
@@ -3225,6 +3233,7 @@ mod gui {
                                     current_batch: Vec::new(),
                                 }
                             });
+
                             self.pick_current_type(words, today, &settings.type_count, rng);
                         }
                     }
@@ -3411,6 +3420,7 @@ mod gui {
                     }
                 });
             if cancel {
+                self.update(words, today, &settings.type_count, rng);
                 self.cancel_learning();
             }
         }
@@ -3458,13 +3468,28 @@ mod gui {
                 response.request_focus();
                 self.give_next_focus = 2;
             }
-            if response.has_focus() && input.keys_down.contains(&Key::Backspace) && self.is_empty {
+            if response.has_focus()
+                && input.events.iter().any(|x| {
+                    if let Event::Key { key, pressed, .. } = x {
+                        *key == Key::Backspace && *pressed
+                    } else {
+                        false
+                    }
+                })
+                && self.is_empty
+            {
                 if let Some(last_response) = &self.last_response {
                     last_response.request_focus();
                 }
             }
             if response.has_focus()
-                && input.keys_down.contains(&Key::Backspace)
+                && input.events.iter().any(|x| {
+                    if let Event::Key { key, pressed, .. } = x {
+                        *key == Key::Enter && *pressed
+                    } else {
+                        false
+                    }
+                })
                 && self.give_next_focus == 0
             {
                 self.give_next_focus = 1;
