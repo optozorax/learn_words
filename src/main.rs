@@ -630,6 +630,8 @@ pub struct Settings {
     dpi: f32,
     #[serde(default)]
     white_theme: bool,
+    #[serde(default)]
+    hour_offset: f64,
 }
 
 #[derive(Default, Serialize, Deserialize, Clone, Debug)]
@@ -711,6 +713,7 @@ impl Default for Settings {
             keyboard_layout: Default::default(),
             dpi: 1.0,
             white_theme: false,
+            hour_offset: 0.,
         }
     }
 }
@@ -1130,10 +1133,14 @@ mod gui {
 
             let window = &mut self.settings_window;
             let settings = &mut self.settings;
+            let mut save = false;
             window.ui(ctx, |t, ui| {
-                t.ui(ui, settings);
+                t.ui(ui, settings, &mut save);
                 false
             });
+            if save {
+                self.save(today, *working_time);
+            }
 
             let window = &mut self.add_words_window;
             let words = &mut self.words;
@@ -1388,7 +1395,7 @@ mod gui {
         }
 
         fn ui(&mut self, ui: &mut Ui) {
-            ui.label("Copy from this field: Ctrl+A, Ctrl+V.");
+            ui.label("Copy from this field: Ctrl+A, Ctrl+C.");
             ui.text_edit_multiline(&mut self.text);
         }
     }
@@ -1472,7 +1479,7 @@ mod gui {
             result
         }
 
-        fn ui(&mut self, ui: &mut Ui, settings: &mut Settings) {
+        fn ui(&mut self, ui: &mut Ui, settings: &mut Settings, save: &mut bool) {
             ui.horizontal(|ui| {
                 ui.label("Theme: ");
                 if !settings.white_theme {
@@ -1483,6 +1490,7 @@ mod gui {
                     {
                         settings.white_theme = !settings.white_theme;
                         ui.ctx().set_visuals(Visuals::light());
+                        *save = true;
                     }
                 } else {
                     if ui
@@ -1492,20 +1500,30 @@ mod gui {
                     {
                         settings.white_theme = !settings.white_theme;
                         ui.ctx().set_visuals(Visuals::dark());
+                        *save = true;
                     }
                 }
             });
 
+            ui.separator();
+
             ui.horizontal(|ui| {
                 ui.label("Inaction time for pause: ");
-                ui.add(
-                    egui::DragValue::new(&mut settings.time_to_pause)
-                        .speed(0.1)
-                        .clamp_range(0.0..=100.0)
-                        .min_decimals(0)
-                        .max_decimals(2),
-                );
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut settings.time_to_pause)
+                            .speed(0.1)
+                            .clamp_range(0.0..=100.0)
+                            .min_decimals(0)
+                            .max_decimals(2),
+                    )
+                    .changed()
+                {
+                    *save = true;
+                }
             });
+
+            ui.separator();
 
             ui.horizontal(|ui| {
                 let scale_factor = 1.05;
@@ -1515,19 +1533,52 @@ mod gui {
                     .clicked()
                 {
                     settings.dpi *= scale_factor;
+                    *save = true;
                 }
                 if ui
                     .add(egui::widgets::Button::new(" - ").text_style(egui::TextStyle::Monospace))
                     .clicked()
                 {
                     settings.dpi /= scale_factor;
+                    *save = true;
                 }
                 *user_dpi() = settings.dpi;
             });
 
+            ui.separator();
+
+            {
+                use chrono::TimeZone;
+                ui.label(format!(
+                    "Now: {}",
+                    chrono::Utc.timestamp(
+                        (miniquad::date::now() + settings.hour_offset * 3600.) as _,
+                        0
+                    )
+                ));
+                ui.horizontal(|ui| {
+                    ui.label("Your time zone: ");
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut settings.hour_offset)
+                                .speed(0.1)
+                                .clamp_range(-15.0..=15.0)
+                                .min_decimals(0)
+                                .max_decimals(2),
+                        )
+                        .changed()
+                    {
+                        *save = true;
+                    }
+                });
+            }
+
+            ui.separator();
+
             ui.collapsing("Automatic change of keyboard layout", |ui| {
                 if !self.want_to_use_keyboard_layout && settings.use_keyboard_layout {
                     self.want_to_use_keyboard_layout = true;
+                    *save = true;
                 }
                 ui.checkbox(
                     &mut self.want_to_use_keyboard_layout,
@@ -1546,6 +1597,7 @@ mod gui {
                                 settings.use_keyboard_layout = true;
                                 settings.keyboard_layout = ok;
                                 self.info = Some(Ok("Used!".to_string()));
+                                *save = true;
                             }
                             Err(err) => {
                                 self.info = Some(Err(err));
@@ -1571,6 +1623,8 @@ mod gui {
                 }
             });
 
+            ui.separator();
+
             ui.collapsing("Repeats", |ui| {
                 let mut delete = None;
                 for (pos, i) in settings.type_count.iter_mut().enumerate() {
@@ -1578,22 +1632,32 @@ mod gui {
                         ui.label(format!("{}.", pos));
                         ui.separator();
                         ui.label("Wait days: ");
-                        ui.add(
-                            egui::DragValue::new(&mut i.wait_days)
-                                .speed(0.1)
-                                .clamp_range(0.0..=99.0)
-                                .min_decimals(0)
-                                .max_decimals(0),
-                        );
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut i.wait_days)
+                                    .speed(0.1)
+                                    .clamp_range(0.0..=99.0)
+                                    .min_decimals(0)
+                                    .max_decimals(0),
+                            )
+                            .changed()
+                        {
+                            *save = true;
+                        }
                         ui.separator();
                         ui.label("Count: ");
-                        ui.add(
-                            egui::DragValue::new(&mut i.count)
-                                .speed(0.1)
-                                .clamp_range(0.0..=99.0)
-                                .min_decimals(0)
-                                .max_decimals(0),
-                        );
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut i.count)
+                                    .speed(0.1)
+                                    .clamp_range(0.0..=99.0)
+                                    .min_decimals(0)
+                                    .max_decimals(0),
+                            )
+                            .changed()
+                        {
+                            *save = true;
+                        }
                         ui.separator();
                         ui.checkbox(&mut i.show_word, "Show hint");
                         ui.separator();
@@ -1615,9 +1679,11 @@ mod gui {
                         count: 1,
                         show_word: false,
                     });
+                    *save = true;
                 }
                 if let Some(pos) = delete {
                     settings.type_count.remove(pos);
+                    *save = true;
                 }
             });
         }
@@ -3864,10 +3930,9 @@ fn user_dpi() -> &'static mut f32 {
 #[macroquad::main(window_conf)]
 async fn main() {
     /// Приватная функция
-    fn current_day() -> Day {
-        Day((miniquad::date::now() / 60. / 60. / 24.) as _)
+    fn current_day(hour_offset: f64) -> Day {
+        Day(((miniquad::date::now() / 60. / 60. + hour_offset) / 24.) as _)
     }
-    let today = current_day();
 
     let mut rng = Rand::seed_from_u64(miniquad::date::now() as u64);
 
@@ -3875,6 +3940,7 @@ async fn main() {
     color_backtrace::install();
 
     let (words, settings, stats) = gui::Program::load();
+    let today = current_day(settings.hour_offset);
 
     *user_dpi() = settings.dpi;
 
