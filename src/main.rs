@@ -1,16 +1,19 @@
 #![allow(clippy::collapsible_else_if)]
 
+pub mod quad_storage;
+
 use ::rand::prelude::*;
-use macroquad::prelude::*;
 use serde::*;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+// use eframe::egui_web;
 
 type Rand = rand_pcg::Pcg64;
 
 macro_rules! err {
     () => {
-        macroquad::logging::error!("error at {}:{}", file!(), line!());
+        // todo
+        // egui_web::console_error(format!("error at {}:{}", file!(), line!()));
     };
 }
 
@@ -630,8 +633,6 @@ pub struct Settings {
     dpi: f32,
     #[serde(default)]
     white_theme: bool,
-    #[serde(default)]
-    hour_offset: f64,
 }
 
 #[derive(Default, Serialize, Deserialize, Clone, Debug)]
@@ -713,7 +714,6 @@ impl Default for Settings {
             keyboard_layout: Default::default(),
             dpi: 1.0,
             white_theme: false,
-            hour_offset: 0.,
         }
     }
 }
@@ -914,7 +914,14 @@ mod gui {
                 ClosableWindow::new(GithubActivityWindow::new(&self.stats, today));
         }
 
-        pub fn ui(&mut self, ctx: &CtxRef, today: Day, working_time: &mut f64, rng: &mut Rand) {
+        pub fn ui(
+            &mut self,
+            ctx: &CtxRef,
+            today: Day,
+            working_time: &mut f64,
+            rng: &mut Rand,
+            paused: bool,
+        ) {
             TopBottomPanel::top("top").show(ctx, |ui| {
                 menu::bar(ui, |ui| {
                     menu::menu(ui, "Data", |ui| {
@@ -1117,7 +1124,7 @@ mod gui {
                     *words = words1;
                     *settings = settings1;
                     *stats = stats1;
-                    *user_dpi() = settings.dpi;
+                    ui.ctx().set_pixels_per_point(settings.dpi);
                     if let Some(time) = stats.by_day.get(&today).map(|x| x.working_time) {
                         *working_time = time;
                     }
@@ -1260,10 +1267,11 @@ mod gui {
             egui::TopBottomPanel::bottom("bottom").show(ctx, |ui| {
                 let today = &self.stats.by_day.entry(today).or_default();
                 ui.monospace(format!(
-                    "Working time: {:6} | Attempts: {:4} | New words: {:4}",
+                    "Working time: {:6} | Attempts: {:4} | New words: {:4}{}",
                     print_time(*working_time),
                     today.attempts.right + today.attempts.wrong,
                     today.new_unknown_words_count,
+                    if paused { "| PAUSED" } else { "" }
                 ));
             });
         }
@@ -1542,36 +1550,8 @@ mod gui {
                     settings.dpi /= scale_factor;
                     *save = true;
                 }
-                *user_dpi() = settings.dpi;
+                ui.ctx().set_pixels_per_point(settings.dpi);
             });
-
-            ui.separator();
-
-            {
-                use chrono::TimeZone;
-                ui.label(format!(
-                    "Now: {}",
-                    chrono::Utc.timestamp(
-                        (miniquad::date::now() + settings.hour_offset * 3600.) as _,
-                        0
-                    )
-                ));
-                ui.horizontal(|ui| {
-                    ui.label("Your time zone: ");
-                    if ui
-                        .add(
-                            egui::DragValue::new(&mut settings.hour_offset)
-                                .speed(0.1)
-                                .clamp_range(-15.0..=15.0)
-                                .min_decimals(0)
-                                .max_decimals(2),
-                        )
-                        .changed()
-                    {
-                        *save = true;
-                    }
-                });
-            }
 
             ui.separator();
 
@@ -3473,17 +3453,20 @@ mod gui {
             }
         }
 
-        fn process_focus(&mut self, response: Response) {
+        fn process_focus(&mut self, response: Response, input: &InputState) {
             if self.give_next_focus == 1 && self.next_enabled {
                 response.request_focus();
                 self.give_next_focus = 2;
             }
-            if response.has_focus() && is_key_pressed(KeyCode::Backspace) && self.is_empty {
+            if response.has_focus() && input.keys_down.contains(&Key::Backspace) && self.is_empty {
                 if let Some(last_response) = &self.last_response {
                     last_response.request_focus();
                 }
             }
-            if response.has_focus() && is_key_pressed(KeyCode::Enter) && self.give_next_focus == 0 {
+            if response.has_focus()
+                && input.keys_down.contains(&Key::Backspace)
+                && self.give_next_focus == 0
+            {
                 self.give_next_focus = 1;
             }
             if !self.focus_gained && *self.gain_focus && self.next_enabled {
@@ -3499,7 +3482,7 @@ mod gui {
         data.is_empty = true;
         let response = ui.add(Button::new(text).enabled(data.next_enabled));
         let result = response.clicked();
-        data.process_focus(response);
+        data.process_focus(response, ui.input());
         result
     }
 
@@ -3531,7 +3514,7 @@ mod gui {
                         )
                     };
                     data.process_text(input, should_be);
-                    data.process_focus(response);
+                    data.process_focus(response, ui.input());
                     data.next_enabled &= input == should_be;
                 }
                 Input => {
@@ -3539,7 +3522,7 @@ mod gui {
                     let response =
                         ui.add(egui::TextEdit::singleline(input).enabled(data.next_enabled));
                     data.process_text(input, should_be);
-                    data.process_focus(response);
+                    data.process_focus(response, ui.input());
                 }
                 Checked(checked) => {
                     ui.with_layout(Layout::right_to_left(), |ui| {
@@ -3866,27 +3849,27 @@ struct PauseDetector {
 impl PauseDetector {
     fn new(time_today: f64) -> Self {
         Self {
-            last_mouse_position: mouse_position(),
+            last_mouse_position: (0., 0.),
             pausing: false,
-            time: get_time(),
-            last_time: get_time(),
+            time: now(),
+            last_time: now(),
             time_without_pauses: time_today,
         }
     }
 
-    fn is_paused(&mut self, settings: &Settings) -> bool {
-        let current_mouse_position = mouse_position();
+    fn is_paused(&mut self, settings: &Settings, input: &egui::InputState) -> bool {
+        let current_mouse_position = {
+            let p = input.pointer.hover_pos().unwrap_or_default();
+            (p.x, p.y)
+        };
         let mouse_offset = (self.last_mouse_position.0 - current_mouse_position.0).abs()
             + (self.last_mouse_position.1 - current_mouse_position.1).abs();
         let mouse_not_moving = mouse_offset < 0.01;
-        let mouse_not_clicking = !is_mouse_button_pressed(MouseButton::Right)
-            && !is_mouse_button_pressed(MouseButton::Left)
-            && !is_mouse_button_pressed(MouseButton::Middle)
-            && !is_mouse_button_pressed(MouseButton::Unknown);
-        let keyboard_not_typing = get_last_key_pressed().is_none();
+        let mouse_not_clicking = !input.pointer.any_down();
+        let keyboard_not_typing = input.keys_down.is_empty();
 
         self.last_mouse_position = current_mouse_position;
-        let now = get_time();
+        let now = now();
         if !(self.pausing && now - self.time > settings.time_to_pause) {
             self.time_without_pauses += now - self.last_time;
         }
@@ -3911,102 +3894,150 @@ impl PauseDetector {
     }
 }
 
-fn window_conf() -> Conf {
-    Conf {
-        window_title: "Learn Words".to_owned(),
-        high_dpi: true,
-        window_width: 1920,
-        window_height: 1080,
-        ..Default::default()
+use eframe::{egui, epi};
+
+pub struct TemplateApp {
+    rng: Rand,
+    today: Day,
+    pause_detector: PauseDetector,
+    program: gui::Program,
+    init: bool,
+}
+
+impl Default for TemplateApp {
+    fn default() -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        color_backtrace::install();
+
+        fn current_day(hour_offset: f64) -> Day {
+            Day(((now() / 60. / 60. + hour_offset) / 24.) as _)
+        }
+
+        let mut rng = Rand::seed_from_u64(now() as u64);
+
+        let (words, settings, stats) = gui::Program::load();
+        let today = current_day(timezone_offset_hours());
+
+        let mut pause_detector = PauseDetector::new(
+            stats
+                .by_day
+                .get(&today)
+                .map(|x| x.working_time)
+                .unwrap_or(0.),
+        );
+
+        let program = gui::Program::new(
+            words,
+            settings,
+            stats,
+            today,
+            *pause_detector.get_working_time(),
+            &mut rng,
+        );
+
+        Self {
+            rng,
+            today,
+            pause_detector,
+            program,
+            init: false,
+        }
     }
 }
 
-fn user_dpi() -> &'static mut f32 {
-    &mut unsafe { macroquad::prelude::get_internal_gl() }
-        .quad_context
-        .user_dpi
-}
-
-#[macroquad::main(window_conf)]
-async fn main() {
-    /// Приватная функция
-    fn current_day(hour_offset: f64) -> Day {
-        Day(((miniquad::date::now() / 60. / 60. + hour_offset) / 24.) as _)
+impl epi::App for TemplateApp {
+    fn name(&self) -> &str {
+        "Learn Words"
     }
 
-    let mut rng = Rand::seed_from_u64(miniquad::date::now() as u64);
+    fn update(&mut self, ctx: &egui::CtxRef, _: &mut epi::Frame<'_>) {
+        if !self.init {
+            self.init = true;
 
+            if self.program.get_settings().white_theme {
+                ctx.set_visuals(egui::Visuals::light());
+            } else {
+                ctx.set_visuals(egui::Visuals::dark());
+            }
+
+            ctx.set_pixels_per_point(self.program.get_settings().dpi);
+        }
+
+        let mut fill = ctx.style().visuals.extreme_bg_color;
+        if !cfg!(target_arch = "wasm32") {
+            // Native: WrapApp uses a transparent window, so let's show that off:
+            // NOTE: the OS compositor assumes "normal" blending, so we need to hack it:
+            let [r, g, b, _] = fill.to_array();
+            fill = egui::Color32::from_rgba_premultiplied(r, g, b, 180);
+        }
+        let frame = egui::Frame::none().fill(fill);
+        egui::CentralPanel::default().frame(frame).show(ctx, |_| {});
+
+        let paused = self
+            .pause_detector
+            .is_paused(self.program.get_settings(), ctx.input());
+        self.program.ui(
+            ctx,
+            self.today,
+            self.pause_detector.get_working_time(),
+            &mut self.rng,
+            paused,
+        );
+    }
+}
+
+// ----------------------------------------------------------------------------
+
+fn timezone_offset_hours() -> f64 {
     #[cfg(not(target_arch = "wasm32"))]
-    color_backtrace::install();
-
-    let (words, settings, stats) = gui::Program::load();
-    let today = current_day(settings.hour_offset);
-
-    *user_dpi() = settings.dpi;
-
-    let mut pause_detector = PauseDetector::new(
-        stats
-            .by_day
-            .get(&today)
-            .map(|x| x.working_time)
-            .unwrap_or(0.),
-    );
-
-    let mut program = gui::Program::new(
-        words,
-        settings,
-        stats,
-        today,
-        *pause_detector.get_working_time(),
-        &mut rng,
-    );
-
-    let texture = Texture2D::from_rgba8(1, 1, &[192, 192, 192, 128]);
-    let pause = Texture2D::from_file_with_format(include_bytes!("../pause.png"), None);
-
-    loop {
-        if program.get_settings().white_theme {
-            clear_background(WHITE);
-        } else {
-            clear_background(BLACK);
-        }
-
-        egui_macroquad::ui(|ctx| {
-            program.ui(ctx, today, pause_detector.get_working_time(), &mut rng);
-        });
-        egui_macroquad::draw();
-
-        if pause_detector.is_paused(program.get_settings()) {
-            draw_texture_ex(
-                texture,
-                0.,
-                0.,
-                WHITE,
-                DrawTextureParams {
-                    dest_size: Some(Vec2::new(screen_width(), screen_height())),
-                    source: None,
-                    rotation: 0.,
-                    flip_x: false,
-                    flip_y: false,
-                    pivot: None,
-                },
-            );
-            draw_texture_ex(
-                pause,
-                screen_width() / 2. - 100.,
-                screen_height() / 2. - 100.,
-                WHITE,
-                DrawTextureParams {
-                    dest_size: Some(Vec2::new(200.0, 200.0)),
-                    source: None,
-                    rotation: 0.,
-                    flip_x: false,
-                    flip_y: false,
-                    pivot: None,
-                },
-            );
-        }
-
-        next_frame().await;
+    {
+        use chrono::offset::Offset;
+        use chrono::offset::TimeZone;
+        use chrono::Local;
+        Local.timestamp(0, 0).offset().fix().local_minus_utc() as f64 / 3600.
     }
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        -js_sys::Date::new_0().get_timezone_offset() / 60.
+    }
+}
+
+pub fn now() -> f64 {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use std::time::SystemTime;
+
+        let time = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_else(|e| panic!("{}", e));
+        time.as_secs_f64()
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        js_sys::Date::now() / 1000.0
+    }
+}
+
+// ----------------------------------------------------------------------------
+
+#[cfg(target_arch = "wasm32")]
+use eframe::wasm_bindgen::{self, prelude::*};
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn start(canvas_id: &str) -> Result<(), eframe::wasm_bindgen::JsValue> {
+    let app = TemplateApp::default();
+    eframe::start_web(canvas_id, Box::new(app))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn main() {}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn main() {
+    let app = TemplateApp::default();
+    let native_options = eframe::NativeOptions::default();
+    eframe::run_native(Box::new(app), native_options);
 }

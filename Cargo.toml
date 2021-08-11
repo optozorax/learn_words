@@ -6,20 +6,21 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-macroquad = "0.3.7"
-egui-macroquad = "0.5.0"
 serde = "1.0.124"
 ron = "0.6.4"
-egui = "0.13.1"
 srtparse = "0.2.0"
 chrono = "0.4.19"
-quad-storage = "0.1.2"
 strsim = "0.10.0"
 rand = "0.7"
 rand_pcg = "0.2"
+eframe = "0.13.0"
+lazy_static = "1.4.0"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 color-backtrace = "0.5.0"
+nanoserde = "0.1.29"
 
-[patch.crates-io]
-miniquad = { path = '/home/zorax/testing/miniquad' }
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2.75"
+js-sys = "0.3.52"
+web-sys = "0.3.52"
