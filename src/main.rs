@@ -1708,7 +1708,7 @@ mod gui {
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 0.;
                 ui.add(egui::Label::new("Version: ").strong());
-                ui.label("0.2.0");
+                ui.label( env!("CARGO_PKG_VERSION"));
             });
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 0.;
