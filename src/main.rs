@@ -1231,8 +1231,9 @@ mod gui {
 
             let words = &mut self.words;
             let mut update_search = false;
+            let mut save = false;
             let closed = self.edit_word_window.ui(ctx, |t, ui| {
-                let result = t.ui(ui, words);
+                let result = t.ui(ui, words, &mut save);
                 update_search = result.1;
                 result.0
             });
@@ -1243,6 +1244,9 @@ mod gui {
             }
             if closed || update_search {
                 self.known_words = self.words.calculate_known_words();
+                self.save(today, *working_time);
+            }
+            if save {
                 self.save(today, *working_time);
             }
 
@@ -1789,7 +1793,7 @@ mod gui {
             }
         }
 
-        fn ui(&mut self, ui: &mut Ui, words: &mut Words) -> (bool, bool) {
+        fn ui(&mut self, ui: &mut Ui, words: &mut Words, save: &mut bool) -> (bool, bool) {
             ui.label("Please not edit words while typing in learning words window!");
             if let Some(getted) = words.0.get_mut(&self.word) {
                 let mut remove_word = false;
@@ -1799,20 +1803,48 @@ mod gui {
                         .clicked()
                     {
                         remove_word = true;
+                        *save = true;
                     }
                     ui.with_layout(Layout::left_to_right(), |ui| {
-                        ui.text_edit_singleline(&mut self.word_to_edit);
+                        if ui.text_edit_singleline(&mut self.word_to_edit).changed() {
+                            *save = true;
+                        }
                     });
                 });
-                for word in getted {
+                let mut rename = None;
+                let mut delete = None;
+                for (pos, word) in getted.iter_mut().enumerate() {
                     ui.separator();
-                    word_status_edit_ui(word, ui);
+                    let mut is_delete = false;
+                    if word_status_edit_ui(word, ui, &mut rename, &mut is_delete) {
+                        *save = true;
+                    }
+                    if is_delete {
+                        delete = Some(pos);
+                    }
+                }
+                ui.separator();
+                if ui
+                    .add(Button::new("Add").text_color(Color32::GREEN))
+                    .clicked()
+                {
+                    getted.push(WordStatus::KnowPreviously);
+                }
+                if let Some(pos) = delete {
+                    getted.remove(pos);
+                    if getted.is_empty() {
+                        remove_word = true;
+                    }
+                }
+                if let Some((previous, new)) = rename {
+                    words.rename_word(&previous, &new);
                 }
                 if self.word_to_edit != self.word {
                     words.rename_word(&self.word, &self.word_to_edit);
                     self.word = self.word_to_edit.clone();
                     return (false, true);
-                } else if remove_word {
+                }
+                if remove_word {
                     words.remove_word(&self.word);
                     return (true, true);
                 }
@@ -3060,7 +3092,7 @@ mod gui {
                             let to_type_new = &mut self.to_type_new;
 
                             self.to_type_today = Some({
-                                let mut result = Vec::new();
+                                let mut result = BTreeSet::new();
 
                                 while !to_type_repeat.is_empty() && result.len() < *n_repeat {
                                     let first = to_type_repeat[0].clone();
@@ -3071,7 +3103,7 @@ mod gui {
                                         &settings.type_count,
                                         |word| {
                                             to_type_repeat.retain(|x| x.0 != word);
-                                            result.push(word.to_string());
+                                            result.insert(word.to_string());
                                         },
                                     );
                                 }
@@ -3084,14 +3116,14 @@ mod gui {
                                         today,
                                         &settings.type_count,
                                         |word| {
-                                            to_type_repeat.retain(|x| x.0 != word);
-                                            result.push(word.to_string());
+                                            to_type_new.retain(|x| x.0 != word);
+                                            result.insert(word.to_string());
                                         },
                                     );
                                 }
 
                                 ToTypeToday {
-                                    all_words: result,
+                                    all_words: result.into_iter().collect(),
                                     current_batch: Vec::new(),
                                 }
                             });
@@ -3585,17 +3617,33 @@ mod gui {
         }
     }
 
-    fn word_status_edit_ui(word: &mut WordStatus, ui: &mut Ui) {
+    fn word_status_edit_ui(
+        word: &mut WordStatus,
+        ui: &mut Ui,
+        rename: &mut Option<(String, String)>,
+        is_delete: &mut bool,
+    ) -> bool {
         use WordStatus::*;
+
+        let mut changed = false;
 
         let mut current_type = word.get_number();
         let previous_type = current_type;
 
-        ui.horizontal(|ui| {
-            for (pos, name) in WordStatus::variants().iter().enumerate().take(2) {
-                ui.selectable_value(&mut current_type, pos, *name);
+        ui.with_layout(Layout::right_to_left(), |ui| {
+            if ui
+                .add(Button::new("Delete").text_color(Color32::RED))
+                .clicked()
+            {
+                *is_delete = true;
             }
+            ui.with_layout(Layout::left_to_right(), |ui| {
+                for (pos, name) in WordStatus::variants().iter().enumerate().take(2) {
+                    ui.selectable_value(&mut current_type, pos, *name);
+                }
+            });
         });
+
         ui.horizontal(|ui| {
             for (pos, name) in WordStatus::variants().iter().enumerate().skip(2) {
                 ui.selectable_value(&mut current_type, pos, *name);
@@ -3604,6 +3652,7 @@ mod gui {
 
         if current_type != previous_type {
             word.set_number(current_type);
+            changed = true;
         }
 
         if let ToLearn {
@@ -3611,22 +3660,35 @@ mod gui {
         }
         | Learned { translation, stats } = word
         {
+            let previous = translation.clone();
+
             ui.text_edit_singleline(translation);
+
+            if previous != *translation {
+                *rename = Some((previous, translation.clone()));
+            }
+
             ui.horizontal(|ui| {
                 ui.label("Right attempts: ");
-                ui.add(
+                let response = ui.add(
                     egui::DragValue::new(&mut stats.right)
                         .clamp_range(0..=100)
                         .speed(1.0),
                 );
+                if response.changed() {
+                    changed = true;
+                }
             });
             ui.horizontal(|ui| {
                 ui.label("Wrong attempts: ");
-                ui.add(
+                let response = ui.add(
                     egui::DragValue::new(&mut stats.wrong)
                         .clamp_range(0..=100)
                         .speed(1.0),
                 );
+                if response.changed() {
+                    changed = true;
+                }
             });
         }
         if let ToLearn {
@@ -3638,29 +3700,39 @@ mod gui {
         {
             ui.horizontal(|ui| {
                 ui.label("Last learn: ");
-                ui.add(
+                let response = ui.add(
                     egui::DragValue::new(&mut last_learn.0)
                         .clamp_range(0..=100_000)
                         .speed(1.0),
                 );
+                if response.changed() {
+                    changed = true;
+                }
             });
             ui.horizontal(|ui| {
                 ui.label("Current level: ");
-                ui.add(
+                let response = ui.add(
                     egui::DragValue::new(current_level)
                         .clamp_range(0..=100)
                         .speed(1.0),
                 );
+                if response.changed() {
+                    changed = true;
+                }
             });
             ui.horizontal(|ui| {
                 ui.label("Current correct writes: ");
-                ui.add(
+                let response = ui.add(
                     egui::DragValue::new(current_count)
                         .clamp_range(0..=100)
                         .speed(1.0),
                 );
+                if response.changed() {
+                    changed = true;
+                }
             });
         }
+        changed
     }
 }
 
