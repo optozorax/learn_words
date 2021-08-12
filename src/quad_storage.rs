@@ -80,7 +80,7 @@ impl LocalStorage {
         #[cfg(target_arch = "wasm32")]
         {
             if let Some(storage) = local_storage() {
-                storage.set_item(key, value);
+                storage.set_item(key, value).unwrap();
             }
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -93,7 +93,7 @@ impl LocalStorage {
         #[cfg(target_arch = "wasm32")]
         {
             if let Some(storage) = local_storage() {
-                storage.remove_item(key);
+                storage.remove_item(key).unwrap();
             }
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -106,7 +106,7 @@ impl LocalStorage {
         #[cfg(target_arch = "wasm32")]
         {
             if let Some(storage) = local_storage() {
-                storage.clear();
+                storage.clear().unwrap();
             }
         }
         #[cfg(not(target_arch = "wasm32"))]

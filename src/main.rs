@@ -1404,6 +1404,12 @@ mod gui {
 
         fn ui(&mut self, ui: &mut Ui) {
             ui.label("Copy from this field: Ctrl+A, Ctrl+C.");
+
+            #[cfg(target_arch = "wasm32")]
+            if ui.button("Download as file").clicked() {
+                download_as_file(&self.text);
+            }
+
             ui.text_edit_multiline(&mut self.text);
         }
     }
@@ -3933,6 +3939,9 @@ impl Default for TemplateApp {
         #[cfg(not(target_arch = "wasm32"))]
         color_backtrace::install();
 
+        #[cfg(target_arch = "wasm32")]
+        std::panic::set_hook(Box::new(console_error_panic_hook::hook));
+
         fn current_day(hour_offset: f64) -> Day {
             Day(((now() / 60. / 60. + hour_offset) / 24.) as _)
         }
@@ -4042,6 +4051,36 @@ pub fn now() -> f64 {
     {
         js_sys::Date::now() / 1000.0
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn download_as_file(text: &str) {
+    use wasm_bindgen::JsCast;
+
+    let window = web_sys::window().unwrap();
+    let document = window.document().unwrap();
+
+    let elem = document.create_element("a").unwrap();
+    let data = format!(
+        "data:text/plain;charset=utf-8,{}",
+        String::from(js_sys::encode_uri_component(text))
+    );
+    elem.set_attribute("href", &data).unwrap();
+    elem.set_attribute("download", "local.data").unwrap();
+
+    let elem = elem.unchecked_into::<web_sys::HtmlElement>();
+
+    elem.style().set_property("display", "none").unwrap();
+
+    let body = document.body().expect("2");
+
+    body.append_child(&elem).expect("3");
+    document.set_body(Some(&body));
+
+    elem.click();
+
+    body.remove_child(&elem).expect("6");
+    document.set_body(Some(&body));
 }
 
 // ----------------------------------------------------------------------------
