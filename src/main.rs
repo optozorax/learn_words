@@ -719,17 +719,33 @@ impl Default for Settings {
 }
 
 impl Settings {
+    fn color_github_zero(&self) -> egui::Color32 {
+        if self.white_theme {
+            egui::Color32::from_gray(240)
+        } else {
+            egui::Color32::from_gray(24)
+        }
+    }
+
     fn color_github_high(&self) -> egui::Color32 {
         if self.white_theme {
-            egui::Color32::from_rgb(60, 94, 61)
+            egui::Color32::from_rgb(33, 110, 57)
         } else {
-            egui::Color32::GREEN
+            egui::Color32::from_rgba_unmultiplied(0, 255, 128, 255)
+        }
+    }
+
+    fn color_github_low(&self) -> egui::Color32 {
+        if self.white_theme {
+            egui::Color32::from_rgb(155, 233, 168)
+        } else {
+            egui::Color32::from_rgba_unmultiplied(5, 101, 5, 255)
         }
     }
 
     fn color_github_month(&self) -> egui::Color32 {
         if self.white_theme {
-            egui::Color32::from_gray(160)
+            egui::Color32::from_rgba_unmultiplied(76, 76, 76, 255)
         } else {
             egui::Color32::WHITE
         }
@@ -737,9 +753,81 @@ impl Settings {
 
     fn color_github_year(&self) -> egui::Color32 {
         if self.white_theme {
-            egui::Color32::from_rgb(173, 118, 118)
+            egui::Color32::from_rgba_unmultiplied(226, 31, 31, 255)
         } else {
             egui::Color32::RED
+        }
+    }
+
+    fn color_delete(&self) -> egui::Color32 {
+        if self.white_theme {
+            egui::Color32::from_rgba_unmultiplied(213, 0, 0, 255)
+        } else {
+            egui::Color32::RED
+        }
+    }
+
+    fn color_add(&self) -> egui::Color32 {
+        if self.white_theme {
+            egui::Color32::from_rgba_unmultiplied(0, 171, 0, 255)
+        } else {
+            egui::Color32::RED
+        }
+    }
+
+    fn color_error(&self) -> egui::Color32 {
+        if self.white_theme {
+            egui::Color32::from_rgba_unmultiplied(255, 0, 0, 255)
+        } else {
+            egui::Color32::RED
+        }
+    }
+
+    fn color_red_field_1(&self) -> egui::Color32 {
+        if self.white_theme {
+            egui::Color32::from_rgba_unmultiplied(255, 0, 0, 255)
+        } else {
+            egui::Color32::RED
+        }
+    }
+
+    fn color_red_field_2(&self) -> egui::Color32 {
+        if self.white_theme {
+            egui::Color32::from_rgba_unmultiplied(224, 0, 0, 200)
+        } else {
+            egui::Color32::from_rgb_additive(128, 0, 0)
+        }
+    }
+
+    fn color_red_field_3(&self) -> egui::Color32 {
+        if self.white_theme {
+            egui::Color32::from_rgba_unmultiplied(255, 128, 128, 255)
+        } else {
+            egui::Color32::from_rgb_additive(255, 128, 128)
+        }
+    }
+
+    fn color_green_field_1(&self) -> egui::Color32 {
+        if self.white_theme {
+            egui::Color32::from_rgba_unmultiplied(0, 255, 0, 255)
+        } else {
+            egui::Color32::GREEN
+        }
+    }
+
+    fn color_green_field_2(&self) -> egui::Color32 {
+        if self.white_theme {
+            egui::Color32::from_rgba_unmultiplied(0, 195, 63, 201)
+        } else {
+            egui::Color32::from_rgb_additive(0, 128, 0)
+        }
+    }
+
+    fn color_green_field_3(&self) -> egui::Color32 {
+        if self.white_theme {
+            egui::Color32::from_rgba_unmultiplied(47, 198, 0, 191)
+        } else {
+            egui::Color32::from_rgb_additive(128, 255, 128)
         }
     }
 }
@@ -1089,8 +1177,9 @@ mod gui {
             let words = &self.words;
             let add_words_window = &mut self.add_words_window;
             let info_window = &mut self.info_window;
+            let settings = &self.settings;
             window.ui(ctx, |t, ui| {
-                if let Some((words, stats)) = t.ui(ui, words) {
+                if let Some((words, stats)) = t.ui(ui, words, settings) {
                     if !words.words_with_context.0.is_empty() {
                         *add_words_window = ClosableWindow::new(AddWordsWindow::new(
                             words.text,
@@ -1120,7 +1209,7 @@ mod gui {
             let settings = &mut self.settings;
             let stats = &mut self.stats;
             let closed = window.ui(ctx, |t, ui| {
-                if let Some((words1, settings1, stats1)) = t.ui(ui) {
+                if let Some((words1, settings1, stats1)) = t.ui(ui, settings) {
                     *words = words1;
                     *settings = settings1;
                     *stats = stats1;
@@ -1228,8 +1317,9 @@ mod gui {
                 false
             });
 
+            let settings = &self.settings;
             self.synchronous_subtitles_window.ui(ctx, |t, ui| {
-                t.ui(ui);
+                t.ui(ui, settings);
                 false
             });
 
@@ -1246,8 +1336,9 @@ mod gui {
             let words = &mut self.words;
             let mut update_search = false;
             let mut save = false;
+            let settings = &self.settings;
             let closed = self.edit_word_window.ui(ctx, |t, ui| {
-                let result = t.ui(ui, words, &mut save);
+                let result = t.ui(ui, words, &mut save, settings);
                 update_search = result.1;
                 result.0
             });
@@ -1327,7 +1418,12 @@ mod gui {
             }
         }
 
-        fn ui(&mut self, ui: &mut Ui, data: &Words) -> Option<(GetWordsResult, LoadTextStats)> {
+        fn ui(
+            &mut self,
+            ui: &mut Ui,
+            data: &Words,
+            settings: &Settings,
+        ) -> Option<(GetWordsResult, LoadTextStats)> {
             let mut action = None;
             ui.horizontal(|ui| {
                 if ui.button("Use this text").clicked() {
@@ -1374,7 +1470,11 @@ mod gui {
                 ui.separator();
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.;
-                    ui.add(Label::new("Error: ").text_color(Color32::RED).monospace());
+                    ui.add(
+                        Label::new("Error: ")
+                            .text_color(settings.color_error())
+                            .monospace(),
+                    );
                     ui.monospace(error);
                 });
             }
@@ -1436,7 +1536,11 @@ mod gui {
             }
         }
 
-        fn ui(&mut self, ui: &mut Ui) -> Option<(Words, Settings, Statistics)> {
+        fn ui(
+            &mut self,
+            ui: &mut Ui,
+            settings: &Settings,
+        ) -> Option<(Words, Settings, Statistics)> {
             let mut action = None;
             ui.horizontal(|ui| {
                 if ui.button("Use this text").clicked() {
@@ -1452,7 +1556,11 @@ mod gui {
                 ui.separator();
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.;
-                    ui.add(Label::new("Error: ").text_color(Color32::RED).monospace());
+                    ui.add(
+                        Label::new("Error: ")
+                            .text_color(settings.color_error())
+                            .monospace(),
+                    );
                     ui.monospace(error);
                 });
             }
@@ -1598,7 +1706,7 @@ mod gui {
                             Err(err) => {
                                 ui.horizontal_wrapped(|ui| {
                                     ui.spacing_mut().item_spacing.x = 0.;
-                                    ui.add(Label::new("Error: ").text_color(Color32::RED).monospace());
+                                    ui.add(Label::new("Error: ").text_color(settings.color_error()).monospace());
                                     ui.monospace(err);
                                 });
                             }
@@ -1613,6 +1721,8 @@ mod gui {
 
             ui.collapsing("Repeats", |ui| {
                 let mut delete = None;
+                let color_delete = settings.color_delete();
+                let color_add = settings.color_add();
                 for (pos, i) in settings.type_count.iter_mut().enumerate() {
                     ui.horizontal(|ui| {
                         ui.label(format!("{}.", pos));
@@ -1648,7 +1758,7 @@ mod gui {
                         ui.checkbox(&mut i.show_word, "Show hint");
                         ui.separator();
                         if ui
-                            .add(Button::new("Delete").text_color(Color32::RED))
+                            .add(Button::new("Delete").text_color(color_delete))
                             .clicked()
                         {
                             delete = Some(pos);
@@ -1656,10 +1766,7 @@ mod gui {
                     });
                 }
                 ui.separator();
-                if ui
-                    .add(Button::new("Add").text_color(Color32::GREEN))
-                    .clicked()
-                {
+                if ui.add(Button::new("Add").text_color(color_add)).clicked() {
                     settings.type_count.push(LearnType {
                         wait_days: 0,
                         count: 1,
@@ -1897,13 +2004,19 @@ mod gui {
             }
         }
 
-        fn ui(&mut self, ui: &mut Ui, words: &mut Words, save: &mut bool) -> (bool, bool) {
+        fn ui(
+            &mut self,
+            ui: &mut Ui,
+            words: &mut Words,
+            save: &mut bool,
+            settings: &Settings,
+        ) -> (bool, bool) {
             ui.label("Please not edit words while typing in learning words window!");
             if let Some(getted) = words.0.get_mut(&self.word) {
                 let mut remove_word = false;
                 ui.with_layout(Layout::right_to_left(), |ui| {
                     if ui
-                        .add(Button::new("Delete").text_color(Color32::RED))
+                        .add(Button::new("Delete").text_color(settings.color_delete()))
                         .clicked()
                     {
                         remove_word = true;
@@ -1920,7 +2033,7 @@ mod gui {
                 for (pos, word) in getted.iter_mut().enumerate() {
                     ui.separator();
                     let mut is_delete = false;
-                    if word_status_edit_ui(word, ui, &mut rename, &mut is_delete) {
+                    if word_status_edit_ui(word, ui, &mut rename, &mut is_delete, settings) {
                         *save = true;
                     }
                     if is_delete {
@@ -1929,7 +2042,7 @@ mod gui {
                 }
                 ui.separator();
                 if ui
-                    .add(Button::new("Add").text_color(Color32::GREEN))
+                    .add(Button::new("Add").text_color(settings.color_add()))
                     .clicked()
                 {
                     getted.push(WordStatus::KnowPreviously);
@@ -2467,7 +2580,7 @@ mod gui {
             }
         }
 
-        fn ui(&mut self, ui: &mut Ui) {
+        fn ui(&mut self, ui: &mut Ui, settings: &Settings) {
             use SynchronousSubtitlesWindow::*;
             let mut update = None;
             let mut update_search = false;
@@ -2502,7 +2615,7 @@ mod gui {
                                 ui.spacing_mut().item_spacing.x = 0.;
                                 ui.add(
                                     Label::new("Left Error: ")
-                                        .text_color(Color32::RED)
+                                        .text_color(settings.color_error())
                                         .monospace(),
                                 );
                                 ui.monospace(&**error1);
@@ -2513,7 +2626,7 @@ mod gui {
                                 ui.spacing_mut().item_spacing.x = 0.;
                                 ui.add(
                                     Label::new("Right Error: ")
-                                        .text_color(Color32::RED)
+                                        .text_color(settings.color_error())
                                         .monospace(),
                                 );
                                 ui.monospace(&**error2);
@@ -2870,13 +2983,31 @@ mod gui {
                     }
 
                     let color = if day.0 < self.min_day.0 || day.0 > self.max_day.0 {
-                        ui.visuals().faint_bg_color
+                        settings.color_github_zero()
                     } else if let Some(value) = self.get_normalized_value(day) {
-                        Color32::from(lerp(
-                            Rgba::from(ui.visuals().faint_bg_color)
-                                ..=Rgba::from(settings.color_github_high()),
-                            (((value as f32) + 0.2) / 1.2).powi(2),
-                        ))
+                        let zero_color = settings.color_github_zero();
+                        let min_color = settings.color_github_low();
+                        let max_color = settings.color_github_high();
+
+                        let value = if settings.white_theme {
+                            (value as f32).powf(0.7)
+                        } else {
+                            (value as f32).powf(0.71)
+                        };
+
+                        if value < 0.1 {
+                            let value = value / 0.1;
+                            Color32::from(lerp(
+                                Rgba::from(zero_color)..=Rgba::from(min_color),
+                                value,
+                            ))
+                        } else {
+                            let value = (value - 0.1) / (1.0 - 0.1);
+                            Color32::from(lerp(
+                                Rgba::from(min_color)..=Rgba::from(max_color),
+                                value,
+                            ))
+                        }
                     } else {
                         ui.visuals().faint_bg_color
                     };
@@ -3267,7 +3398,7 @@ mod gui {
 
                         if let Some(word_by_hint) = word_by_hint {
                             ui.label("Word:");
-                            InputField::Hint.ui(ui, &mut data, word_by_hint, word);
+                            InputField::Hint.ui(ui, &mut data, word_by_hint, word, settings);
                             ui.separator();
                         } else {
                             ui.add(Label::new(&word).heading().strong());
@@ -3281,13 +3412,13 @@ mod gui {
                             .iter()
                             .zip(words_to_type.iter_mut())
                         {
-                            InputField::Hint.ui(ui, &mut data, i, hint);
+                            InputField::Hint.ui(ui, &mut data, i, hint, settings);
                         }
                         for (i, correct) in words_to_guess
                             .iter_mut()
                             .zip(correct_answer.words_to_guess.iter())
                         {
-                            InputField::Input.ui(ui, &mut data, i, correct);
+                            InputField::Input.ui(ui, &mut data, i, correct, settings);
                         }
 
                         if input_field_button(ui, "Check", &mut data) {
@@ -3383,9 +3514,13 @@ mod gui {
                         }
 
                         for i in typed {
-                            with_green_color(ui, |ui| {
-                                ui.add(egui::TextEdit::singleline(i).enabled(false));
-                            });
+                            with_green_color(
+                                ui,
+                                |ui| {
+                                    ui.add(egui::TextEdit::singleline(i).enabled(false));
+                                },
+                                settings,
+                            );
                         }
 
                         for word in result.iter_mut() {
@@ -3394,6 +3529,7 @@ mod gui {
                                 &mut data,
                                 &mut word.typed,
                                 &word.translation,
+                                settings,
                             );
                         }
 
@@ -3404,7 +3540,13 @@ mod gui {
 
                         for (word, to_repeat) in result.iter_mut().zip(to_repeat.iter_mut()) {
                             if !word.correct {
-                                InputField::Hint.ui(ui, &mut data, to_repeat, &word.translation);
+                                InputField::Hint.ui(
+                                    ui,
+                                    &mut data,
+                                    to_repeat,
+                                    &word.translation,
+                                    settings,
+                                );
                             }
                         }
 
@@ -3523,19 +3665,24 @@ mod gui {
             data: &mut InputFieldData,
             input: &mut String,
             should_be: &str,
+            settings: &Settings,
         ) {
             use InputField::*;
             match self {
                 Hint => {
                     data.is_empty = input.is_empty();
                     let response = if input == should_be {
-                        with_green_color(ui, |ui| {
-                            ui.add(
-                                egui::TextEdit::singleline(input)
-                                    .hint_text(format!(" {}", should_be))
-                                    .enabled(data.next_enabled),
-                            )
-                        })
+                        with_green_color(
+                            ui,
+                            |ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(input)
+                                        .hint_text(format!(" {}", should_be))
+                                        .enabled(data.next_enabled),
+                                )
+                            },
+                            settings,
+                        )
                     } else {
                         ui.add(
                             egui::TextEdit::singleline(input)
@@ -3561,14 +3708,22 @@ mod gui {
                         }
                         if **checked {
                             ui.label(format!("✅ {}", should_be));
-                            with_green_color(ui, |ui| {
-                                ui.add(egui::TextEdit::singleline(input).enabled(false));
-                            });
+                            with_green_color(
+                                ui,
+                                |ui| {
+                                    ui.add(egui::TextEdit::singleline(input).enabled(false));
+                                },
+                                settings,
+                            );
                         } else {
                             ui.label(format!("❌ {}", should_be));
-                            with_red_color(ui, |ui| {
-                                ui.add(egui::TextEdit::singleline(input).enabled(false));
-                            });
+                            with_red_color(
+                                ui,
+                                |ui| {
+                                    ui.add(egui::TextEdit::singleline(input).enabled(false));
+                                },
+                                settings,
+                            );
                         }
                     });
                 }
@@ -3639,22 +3794,30 @@ mod gui {
         result
     }
 
-    fn with_green_color<Res>(ui: &mut Ui, f: impl FnOnce(&mut Ui) -> Res) -> Res {
+    fn with_green_color<Res>(
+        ui: &mut Ui,
+        f: impl FnOnce(&mut Ui) -> Res,
+        settings: &Settings,
+    ) -> Res {
         with_color(
             ui,
-            Color32::GREEN,
-            Color32::from_rgb_additive(0, 128, 0),
-            Color32::from_rgb_additive(128, 255, 128),
+            settings.color_green_field_1(),
+            settings.color_green_field_2(),
+            settings.color_green_field_3(),
             f,
         )
     }
 
-    fn with_red_color<Res>(ui: &mut Ui, f: impl FnOnce(&mut Ui) -> Res) -> Res {
+    fn with_red_color<Res>(
+        ui: &mut Ui,
+        f: impl FnOnce(&mut Ui) -> Res,
+        settings: &Settings,
+    ) -> Res {
         with_color(
             ui,
-            Color32::RED,
-            Color32::from_rgb_additive(128, 0, 0),
-            Color32::from_rgb_additive(255, 128, 128),
+            settings.color_red_field_1(),
+            settings.color_red_field_2(),
+            settings.color_red_field_3(),
             f,
         )
     }
@@ -3753,6 +3916,7 @@ mod gui {
         ui: &mut Ui,
         rename: &mut Option<(String, String)>,
         is_delete: &mut bool,
+        settings: &Settings,
     ) -> bool {
         use WordStatus::*;
 
@@ -3763,7 +3927,7 @@ mod gui {
 
         ui.with_layout(Layout::right_to_left(), |ui| {
             if ui
-                .add(Button::new("Delete").text_color(Color32::RED))
+                .add(Button::new("Delete").text_color(settings.color_delete()))
                 .clicked()
             {
                 *is_delete = true;
