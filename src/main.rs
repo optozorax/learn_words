@@ -561,6 +561,13 @@ impl Words {
             0
         }
     }
+
+    fn can_learn_today(&self, word: &str, today: Day, type_count: &[LearnType]) -> bool {
+        self.0
+            .get(word)
+            .map(|x| x.iter().any(|x| x.can_learn_today(today, type_count)))
+            .unwrap_or(false)
+    }
 }
 
 fn get_words_subtitles(subtitles: &str) -> Result<GetWordsResult, srtparse::ReaderError> {
@@ -3189,6 +3196,12 @@ mod gui {
             type_count: &[LearnType],
             rng: &mut Rand,
         ) {
+            if let Some(to_type_today) = &mut self.to_type_today {
+                to_type_today
+                    .all_words
+                    .retain(|x| words.can_learn_today(x, today, type_count));
+            }
+
             loop {
                 if self.to_type_repeat.is_empty()
                     && self.to_type_new.is_empty()
