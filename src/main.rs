@@ -1211,17 +1211,13 @@ mod gui {
                 }
             });
 
-            let window = &mut self.import_window;
-            let words = &mut self.words;
-            let settings = &mut self.settings;
-            let stats = &mut self.stats;
-            let closed = window.ui(ctx, |t, ui| {
-                if let Some((words1, settings1, stats1)) = t.ui(ui, settings) {
-                    *words = words1;
-                    *settings = settings1;
-                    *stats = stats1;
-                    ui.ctx().set_pixels_per_point(settings.dpi);
-                    if let Some(time) = stats.by_day.get(&today).map(|x| x.working_time) {
+            let closed = self.import_window.ui(ctx, |t, ui| {
+                if let Some((words1, settings1, stats1)) = t.ui(ui, &self.settings) {
+                    self.words = words1;
+                    self.settings = settings1;
+                    self.stats = stats1;
+                    ui.ctx().set_pixels_per_point(self.settings.dpi);
+                    if let Some(time) = self.stats.by_day.get(&today).map(|x| x.working_time) {
                         *working_time = time;
                     }
                     true
@@ -1234,28 +1230,29 @@ mod gui {
                     .update(&self.words, today, &self.settings.type_count, rng);
             }
 
-            let window = &mut self.settings_window;
-            let settings = &mut self.settings;
             let mut save = false;
-            window.ui(ctx, |t, ui| {
-                t.ui(ui, settings, &mut save);
+            self.settings_window.ui(ctx, |t, ui| {
+                t.ui(ui, &mut self.settings, &mut save);
                 false
             });
             if save {
                 self.save(today, *working_time);
             }
 
-            let window = &mut self.add_words_window;
-            let words = &mut self.words;
-            let stats = &mut self.stats;
-            let search_words_window = &mut self.search_words_window;
-            let synchronous_subtitles_window = &mut self.synchronous_subtitles_window;
             let mut save = false;
-            let closed = window.ui(ctx, |t, ui| {
-                if let Some((word, to_add, close)) =
-                    t.ui(ui, search_words_window, synchronous_subtitles_window, words)
-                {
-                    words.add_word(word, to_add, today, stats.by_day.entry(today).or_default());
+            let closed = self.add_words_window.ui(ctx, |t, ui| {
+                if let Some((word, to_add, close)) = t.ui(
+                    ui,
+                    &mut self.search_words_window,
+                    &mut self.synchronous_subtitles_window,
+                    &self.words,
+                ) {
+                    self.words.add_word(
+                        word,
+                        to_add,
+                        today,
+                        self.stats.by_day.entry(today).or_default(),
+                    );
                     save = true;
                     close
                 } else {
@@ -1272,13 +1269,15 @@ mod gui {
                 self.save(today, *working_time);
             }
 
-            let window = &mut self.add_custom_words_window;
-            let words = &mut self.words;
-            let stats = &mut self.stats;
             let mut save = false;
-            let closed = window.ui(ctx, |t, ui| {
+            let closed = self.add_custom_words_window.ui(ctx, |t, ui| {
                 if let Some((word, to_add)) = t.ui(ui) {
-                    words.add_word(word, to_add, today, stats.by_day.entry(today).or_default());
+                    self.words.add_word(
+                        word,
+                        to_add,
+                        today,
+                        self.stats.by_day.entry(today).or_default(),
+                    );
                     save = true;
                 }
                 false
@@ -1303,9 +1302,8 @@ mod gui {
                 false
             });
 
-            let settings = &self.settings;
             self.github_activity_window.ui(ctx, |t, ui| {
-                t.ui(ui, settings);
+                t.ui(ui, &self.settings);
                 false
             });
 
@@ -1324,28 +1322,24 @@ mod gui {
                 false
             });
 
-            let settings = &self.settings;
             self.synchronous_subtitles_window.ui(ctx, |t, ui| {
-                t.ui(ui, settings);
+                t.ui(ui, &self.settings);
                 false
             });
 
-            let words = &self.words;
             let mut edit_word = None;
             self.search_words_window.ui(ctx, |t, ui| {
-                edit_word = t.ui(ui, words);
+                edit_word = t.ui(ui, &self.words);
                 false
             });
             if let Some(edit_word) = edit_word {
                 self.edit_word_window = ClosableWindow::new(EditWordWindow::new(edit_word));
             }
 
-            let words = &mut self.words;
             let mut update_search = false;
             let mut save = false;
-            let settings = &self.settings;
             let closed = self.edit_word_window.ui(ctx, |t, ui| {
-                let result = t.ui(ui, words, &mut save, settings);
+                let result = t.ui(ui, &mut self.words, &mut save, &self.settings);
                 update_search = result.1;
                 result.0
             });
@@ -1403,7 +1397,7 @@ mod gui {
             } else {
                 "Words from text"
             })
-            .scroll(true)
+            .vscroll(true)
             .fixed_size((200., 200.))
             .collapsible(false)
         }
@@ -1498,7 +1492,7 @@ mod gui {
     impl WindowTrait for ExportWindow {
         fn create_window(&self) -> Window<'static> {
             Window::new("Export data")
-                .scroll(true)
+                .vscroll(true)
                 .fixed_size((200., 200.))
                 .collapsible(false)
         }
@@ -1529,7 +1523,7 @@ mod gui {
     impl WindowTrait for ImportWindow {
         fn create_window(&self) -> Window<'static> {
             Window::new("Import data")
-                .scroll(true)
+                .vscroll(true)
                 .fixed_size((200., 200.))
                 .collapsible(false)
         }
@@ -1587,7 +1581,7 @@ mod gui {
     impl WindowTrait for SettingsWindow {
         fn create_window(&self) -> Window<'static> {
             Window::new("Settings")
-                .scroll(false)
+                .vscroll(false)
                 .fixed_size((300., 100.))
                 .collapsible(false)
         }
@@ -1794,7 +1788,7 @@ mod gui {
     impl WindowTrait for InfoWindow {
         fn create_window(&self) -> Window<'static> {
             Window::new("Info")
-                .scroll(false)
+                .vscroll(false)
                 .fixed_size((200., 50.))
                 .collapsible(false)
         }
@@ -1813,7 +1807,7 @@ mod gui {
     impl WindowTrait for AboutWindow {
         fn create_window(&self) -> Window<'static> {
             Window::new("About")
-                .scroll(false)
+                .vscroll(false)
                 .fixed_size((320., 100.))
                 .collapsible(false)
         }
@@ -1857,7 +1851,7 @@ mod gui {
     impl WindowTrait for SearchWordsWindow {
         fn create_window(&self) -> Window<'static> {
             Window::new("Search words")
-                .scroll(false)
+                .vscroll(false)
                 .fixed_size((200., 300.))
                 .collapsible(false)
         }
@@ -1922,7 +1916,7 @@ mod gui {
             ui.checkbox(&mut self.show_inners, "Show inners");
             ui.separator();
             let mut edit_word = None;
-            ScrollArea::from_max_height(200.0).show(ui, |ui| {
+            ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
                 if self.search_string.is_empty() {
                     if self.show_inners {
                         for (n, (word, translations)) in words.0.iter().enumerate() {
@@ -1997,7 +1991,7 @@ mod gui {
     impl WindowTrait for EditWordWindow {
         fn create_window(&self) -> Window<'static> {
             Window::new("Edit word")
-                .scroll(true)
+                .vscroll(true)
                 .fixed_size((200., 300.))
                 .collapsible(false)
         }
@@ -2090,7 +2084,7 @@ mod gui {
     impl WindowTrait for AddWordsWindow {
         fn create_window(&self) -> Window<'static> {
             Window::new("Add words")
-                .scroll(false)
+                .vscroll(false)
                 .fixed_size((400., 400.))
                 .collapsible(false)
         }
@@ -2142,7 +2136,7 @@ mod gui {
                             self.previous = None;
                         }
                     } else {
-                        ui.add(Button::new("Return previous").enabled(false));
+                        ui.add_enabled(false, Button::new("Return previous"));
                     }
                 });
                 if let Some((word, to_add)) = word_to_add(
@@ -2163,7 +2157,7 @@ mod gui {
                 if self.words.0.is_empty() {
                     return action;
                 }
-                ScrollArea::from_max_height(200.0).show(ui, |ui| {
+                ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
                     const CONTEXT_SIZE: usize = 50;
                     for range in &self.words.0[0].1 {
                         let mut start = range.start.saturating_sub(CONTEXT_SIZE);
@@ -2209,7 +2203,7 @@ mod gui {
     impl WindowTrait for AddCustomWordsWindow {
         fn create_window(&self) -> Window<'static> {
             Window::new("Add words")
-                .scroll(false)
+                .vscroll(false)
                 .fixed_size((200., 100.))
                 .collapsible(false)
         }
@@ -2244,7 +2238,7 @@ mod gui {
     impl WindowTrait for FullStatsWindow {
         fn create_window(&self) -> Window<'static> {
             Window::new("Full statistics")
-                .scroll(false)
+                .vscroll(false)
                 .fixed_size((150., 100.))
                 .collapsible(false)
         }
@@ -2285,7 +2279,7 @@ mod gui {
 
     impl WindowTrait for PercentageGraphWindow {
         fn create_window(&self) -> Window<'static> {
-            Window::new(self.name).scroll(false).collapsible(false)
+            Window::new(self.name).vscroll(false).collapsible(false)
         }
     }
 
@@ -2361,12 +2355,12 @@ mod gui {
         fn create_window(&self) -> Window<'static> {
             if matches!(self, SynchronousSubtitlesWindow::Load { .. }) {
                 Window::new("Load synchronous subtitles")
-                    .scroll(true)
+                    .vscroll(true)
                     .fixed_size((300., 200.))
                     .collapsible(false)
             } else {
                 Window::new("View synchronous subtitles")
-                    .scroll(false)
+                    .vscroll(false)
                     .fixed_size((400., 200.))
                     .collapsible(false)
             }
@@ -2424,8 +2418,8 @@ mod gui {
                 #[rustfmt::skip]
                 macro_rules! other { () => { if is_second { &mut sub1 } else { &mut sub2 } }; }
                 if !current!()[pos].2 {
+                    current!()[pos].2 = true;
                     if let Some(pos1) = other!().iter().position(|x| x.0.contains(&end) && !x.2) {
-                        current!()[pos].2 = true;
                         other!()[pos1].2 = true;
                         if is_second {
                             result.push((Some(sub1[pos1].1.clone()), Some(sub2[pos].1.clone())));
@@ -2433,7 +2427,6 @@ mod gui {
                             result.push((Some(sub1[pos].1.clone()), Some(sub2[pos1].1.clone())));
                         }
                     } else {
-                        current!()[pos].2 = true;
                         if is_second {
                             result.push((None, Some(sub2[pos].1.clone())));
                         } else {
@@ -2673,12 +2666,12 @@ mod gui {
                             update_search = true;
                         }
                         ui.separator();
-                        if ui.add(Button::new("◀").enabled(*position > 1)).clicked() {
+                        if ui.add_enabled(*position > 1, Button::new("◀")).clicked() {
                             *position -= 1;
                             update_scroll = true;
                         }
                         if ui
-                            .add(Button::new("▶").enabled(*position + 1 < found.len()))
+                            .add_enabled(*position + 1 < found.len(), Button::new("▶"))
                             .clicked()
                         {
                             *position += 1;
@@ -2687,7 +2680,7 @@ mod gui {
                         ui.label(format!("{}/{}", *position, found.len() - 1));
                     });
                     ui.separator();
-                    ScrollArea::from_max_height(200.0).show(ui, |ui| {
+                    ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
                         Grid::new("view_grid")
                             .spacing([4.0, 4.0])
                             .max_col_width(150.)
@@ -2767,7 +2760,7 @@ mod gui {
     impl WindowTrait for GithubActivityWindow {
         fn create_window(&self) -> Window<'static> {
             Window::new("Activity")
-                .scroll(false)
+                .vscroll(false)
                 .collapsible(false)
                 .resizable(false)
         }
@@ -3312,7 +3305,7 @@ mod gui {
             egui::Window::new("Learn words")
                 .fixed_size((300., 0.))
                 .collapsible(false)
-                .scroll(false)
+                .vscroll(false)
                 .show(ctx, |ui| match &mut self.current {
                     LearnWords::None => {
                         ui.label("🎉🎉🎉 Everything is learned for today! 🎉🎉🎉");
@@ -3349,7 +3342,9 @@ mod gui {
                             self.to_type_today = Some({
                                 let mut result = BTreeSet::new();
 
-                                while !to_type_repeat.is_empty() && result.len() < *n_repeat {
+                                while (n_repeat == all_repeat || result.len() < *n_repeat)
+                                    && !to_type_repeat.is_empty()
+                                {
                                     let first = to_type_repeat[0].clone();
                                     select_with_translations(
                                         &first.0,
@@ -3363,7 +3358,11 @@ mod gui {
                                     );
                                 }
 
-                                while !to_type_new.is_empty() && result.len() < *n_repeat + *n_new {
+                                *n_repeat = result.len();
+
+                                while (n_new == all_new || result.len() < *n_repeat + *n_new)
+                                    && !to_type_new.is_empty()
+                                {
                                     let first = to_type_new[0].clone();
                                     select_with_translations(
                                         &first.0,
@@ -3418,7 +3417,7 @@ mod gui {
                         }
 
                         for i in &mut correct_answer.known_words {
-                            ui.add(egui::TextEdit::singleline(i).enabled(false));
+                            ui.add_enabled(false, egui::TextEdit::singleline(i));
                         }
                         for (hint, i) in correct_answer
                             .words_to_type
@@ -3523,14 +3522,14 @@ mod gui {
                         let mut data = InputFieldData::new(settings, &mut *gain_focus);
 
                         for i in known_words {
-                            ui.add(egui::TextEdit::singleline(i).enabled(false));
+                            ui.add_enabled(false, egui::TextEdit::singleline(i));
                         }
 
                         for i in typed {
                             with_green_color(
                                 ui,
                                 |ui| {
-                                    ui.add(egui::TextEdit::singleline(i).enabled(false));
+                                    ui.add_enabled(false, egui::TextEdit::singleline(i));
                                 },
                                 settings,
                             );
@@ -3665,7 +3664,7 @@ mod gui {
 
     fn input_field_button(ui: &mut Ui, text: &str, data: &mut InputFieldData) -> bool {
         data.is_empty = true;
-        let response = ui.add(Button::new(text).enabled(data.next_enabled));
+        let response = ui.add_enabled(data.next_enabled, Button::new(text));
         let result = response.clicked();
         data.process_focus(response, ui.input());
         result
@@ -3688,19 +3687,18 @@ mod gui {
                         with_green_color(
                             ui,
                             |ui| {
-                                ui.add(
+                                ui.add_enabled(
+                                    data.next_enabled,
                                     egui::TextEdit::singleline(input)
-                                        .hint_text(format!(" {}", should_be))
-                                        .enabled(data.next_enabled),
+                                        .hint_text(format!(" {}", should_be)),
                                 )
                             },
                             settings,
                         )
                     } else {
-                        ui.add(
-                            egui::TextEdit::singleline(input)
-                                .hint_text(format!(" {}", should_be))
-                                .enabled(data.next_enabled),
+                        ui.add_enabled(
+                            data.next_enabled,
+                            egui::TextEdit::singleline(input).hint_text(format!(" {}", should_be)),
                         )
                     };
                     data.process_text(input, should_be);
@@ -3710,7 +3708,7 @@ mod gui {
                 Input => {
                     data.is_empty = input.is_empty();
                     let response =
-                        ui.add(egui::TextEdit::singleline(input).enabled(data.next_enabled));
+                        ui.add_enabled(data.next_enabled, egui::TextEdit::singleline(input));
                     data.process_text(input, should_be);
                     data.process_focus(response, ui.input());
                 }
@@ -3724,7 +3722,7 @@ mod gui {
                             with_green_color(
                                 ui,
                                 |ui| {
-                                    ui.add(egui::TextEdit::singleline(input).enabled(false));
+                                    ui.add_enabled(false, egui::TextEdit::singleline(input));
                                 },
                                 settings,
                             );
@@ -3733,7 +3731,7 @@ mod gui {
                             with_red_color(
                                 ui,
                                 |ui| {
-                                    ui.add(egui::TextEdit::singleline(input).enabled(false));
+                                    ui.add_enabled(false, egui::TextEdit::singleline(input));
                                 },
                                 settings,
                             );
