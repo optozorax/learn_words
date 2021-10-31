@@ -3591,9 +3591,14 @@ mod gui {
         Checked(&'a mut bool),
     }
 
-    struct InputFieldData<'a> {
+    struct FocusThing {
         last_response: Option<Response>,
+        last_enabled_response: Option<Response>,
         give_next_focus: u8,
+    }
+
+    struct InputFieldData<'a> {
+        f: FocusThing,
         focus_gained: bool,
         gain_focus: &'a mut bool,
         settings: &'a Settings,
@@ -3602,11 +3607,24 @@ mod gui {
         next_enabled: bool,
     }
 
+    impl Drop for FocusThing {
+        fn drop(&mut self) {
+            if self.give_next_focus == 1 {
+                if let Some(last) = &mut self.last_enabled_response {
+                    last.request_focus();
+                }
+            }
+        }
+    }
+
     impl<'a> InputFieldData<'a> {
         fn new(settings: &'a Settings, gain_focus: &'a mut bool) -> InputFieldData<'a> {
             Self {
-                last_response: None,
-                give_next_focus: 0,
+                f: FocusThing {
+                    last_response: None,
+                    last_enabled_response: None,
+                    give_next_focus: 0,
+                },
                 focus_gained: false,
                 gain_focus,
                 settings,
@@ -3623,9 +3641,9 @@ mod gui {
         }
 
         fn process_focus(&mut self, response: Response, input: &InputState) {
-            if self.give_next_focus == 1 && self.next_enabled {
+            if self.f.give_next_focus == 1 && self.next_enabled {
                 response.request_focus();
-                self.give_next_focus = 2;
+                self.f.give_next_focus = 2;
             }
             if response.has_focus()
                 && input.events.iter().any(|x| {
@@ -3637,11 +3655,11 @@ mod gui {
                 })
                 && self.is_empty
             {
-                if let Some(last_response) = &self.last_response {
+                if let Some(last_response) = &self.f.last_response {
                     last_response.request_focus();
                 }
             }
-            if response.has_focus()
+            if response.lost_focus()
                 && input.events.iter().any(|x| {
                     if let Event::Key { key, pressed, .. } = x {
                         *key == Key::Enter && *pressed
@@ -3649,16 +3667,19 @@ mod gui {
                         false
                     }
                 })
-                && self.give_next_focus == 0
+                && self.f.give_next_focus == 0
             {
-                self.give_next_focus = 1;
+                self.f.give_next_focus = 1;
             }
             if !self.focus_gained && *self.gain_focus && self.next_enabled {
                 response.request_focus();
                 self.focus_gained = true;
                 *self.gain_focus = false;
             }
-            self.last_response = Some(response);
+            if response.enabled() {
+                self.f.last_enabled_response = Some(response.clone());
+            }
+            self.f.last_response = Some(response);
         }
     }
 
