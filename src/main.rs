@@ -2860,10 +2860,11 @@ mod gui {
         fn get_value_text(&self, day: Day) -> Option<String> {
             self.data_by_day.get(&day).map(|x| {
                 format!(
-                    "Attempts: {}\nTime: {}\nNew words: {}",
+                    "Attempts: {}\nTime: {}\nNew words: {}\nTime for 1 attempt: {:.1}s",
                     x.attempts,
                     print_time(x.time),
-                    x.new_unknown_words_count
+                    x.new_unknown_words_count,
+                    x.time / x.attempts as f64
                 )
             })
         }
@@ -3640,7 +3641,7 @@ mod gui {
             }
         }
 
-        fn process_focus(&mut self, response: Response, input: &InputState) {
+        fn process_focus(&mut self, response: Response, input: &InputState, allow_gain: bool) {
             if self.f.give_next_focus == 1 && self.next_enabled {
                 response.request_focus();
                 self.f.give_next_focus = 2;
@@ -3671,7 +3672,7 @@ mod gui {
             {
                 self.f.give_next_focus = 1;
             }
-            if !self.focus_gained && *self.gain_focus && self.next_enabled {
+            if !self.focus_gained && *self.gain_focus && self.next_enabled && allow_gain {
                 response.request_focus();
                 self.focus_gained = true;
                 *self.gain_focus = false;
@@ -3687,7 +3688,7 @@ mod gui {
         data.is_empty = true;
         let response = ui.add_enabled(data.next_enabled, Button::new(text));
         let result = response.clicked();
-        data.process_focus(response, ui.input());
+        data.process_focus(response, ui.input(), true);
         result
     }
 
@@ -3723,7 +3724,7 @@ mod gui {
                         )
                     };
                     data.process_text(input, should_be);
-                    data.process_focus(response, ui.input());
+                    data.process_focus(response, ui.input(), true);
                     data.next_enabled &= input == should_be;
                 }
                 Input => {
@@ -3731,13 +3732,15 @@ mod gui {
                     let response =
                         ui.add_enabled(data.next_enabled, egui::TextEdit::singleline(input));
                     data.process_text(input, should_be);
-                    data.process_focus(response, ui.input());
+                    data.process_focus(response, ui.input(), true);
                 }
                 Checked(checked) => {
                     ui.with_layout(Layout::right_to_left(), |ui| {
-                        if ui.button("Invert").clicked() {
+                        let response = ui.button("Invert");
+                        if response.clicked() {
                             **checked = !**checked;
                         }
+                        data.process_focus(response, ui.input(), false);
                         if **checked {
                             ui.label(format!("✅ {}", should_be));
                             with_green_color(
